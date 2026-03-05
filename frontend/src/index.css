@@ -1,0 +1,43 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+:root {
+  --color-bg: #faf8f5;
+  --color-text: #1a1a1a;
+  --color-text-muted: #6b6b6b;
+  --color-accent: #c0622f;
+  --color-accent-dark: #a0521f;
+  --color-surface: #ffffff;
+  --color-border: #e8e2da;
+
+  --font-display: 'Playfair Display', serif;
+  --font-body: 'DM Sans', sans-serif;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  margin: 0;
+  padding: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+}
+
+a {
+  text-decoration: inherit;
+  color: inherit;
+}
