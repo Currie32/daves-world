@@ -65,3 +65,16 @@ node_modules/
 # dotenv environment variables file
 .env
 .env.local
+
+# macOS
+.DS_Store
+
+# Python
+functions/venv/
+functions/__pycache__/
+**/*.pyc
+
+# Private cookbook recipe data
+frontend/src/data/cookbooks/
+frontend/src/data/recipes.json
+frontend/public/recipes.json

@@ -1,10 +1,11 @@
-export default function SearchInput({ placeholder, onChange, value }) {
+export default function SearchInput({ placeholder, onChange, value, onKeyDown }) {
   return (
     <input
       type="text"
       value={value}
       placeholder={placeholder}
       onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown}
       style={{
         width: '100%',
         padding: '0.75rem 1rem',

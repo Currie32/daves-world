@@ -3,16 +3,19 @@ import Home from './pages/Home';
 import Cookbooks from './pages/Cookbooks';
 import PlaylistGenerator from './pages/PlaylistGenerator';
 import Recommendations from './pages/Recommendations';
+import Layout from './components/Layout';
 
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/cookbooks" element={<Cookbooks />} />
-        <Route path="/playlist-generator" element={<PlaylistGenerator />} />
-        <Route path="/recommendations" element={<Recommendations />} />
-      </Routes>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/cookbooks" element={<Cookbooks />} />
+          <Route path="/playlist-generator" element={<PlaylistGenerator />} />
+          <Route path="/recommendations" element={<Recommendations />} />
+        </Routes>
+      </Layout>
     </BrowserRouter>
   );
 }

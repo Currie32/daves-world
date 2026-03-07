@@ -1,0 +1,4 @@
+firebase-admin>=6.0.0
+firebase-functions>=0.1.0
+recipe-scrapers>=15.0.0
+requests>=2.31.0

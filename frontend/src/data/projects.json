@@ -1,0 +1,50 @@
+[
+  {
+    "id": "cookbooks",
+    "title": "Cookbooks",
+    "description": "A searchable index of cookbooks.",
+    "emoji": "📚",
+    "route": "/cookbooks",
+    "comingSoon": false
+  },
+  {
+    "id": "playlist-generator",
+    "title": "Playlist Generator",
+    "description": "Creates a Spotify playlist based on...",
+    "emoji": "🎵",
+    "route": "/playlist-generator",
+    "comingSoon": false
+  },
+  {
+    "id": "recommendations",
+    "title": "Recommendations",
+    "description": "Places and things that I like.",
+    "emoji": "📍",
+    "route": "/recommendations",
+    "comingSoon": false
+  },
+  {
+    "id": "reading-list",
+    "title": "Reading List",
+    "description": "Books read, currently reading, and want to read.",
+    "emoji": "📖",
+    "route": "/reading-list",
+    "comingSoon": true
+  },
+  {
+    "id": "recipe-box",
+    "title": "Recipe Box",
+    "description": "Personal recipes with ingredient scaling.",
+    "emoji": "🍳",
+    "route": "/recipe-box",
+    "comingSoon": true
+  },
+  {
+    "id": "travel-log",
+    "title": "Travel Log",
+    "description": "A map of places I've visited.",
+    "emoji": "✈️",
+    "route": "/travel-log",
+    "comingSoon": true
+  }
+]
