@@ -177,7 +177,7 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
     const ingCount = new Map();
     const catSet = new Set();
     allRecipes.forEach((r) => {
-      (r.ingredientsStandardised || r.ingredients || []).forEach((i) => {
+      (r.ingredients || r.ingredientsStandardised || []).forEach((i) => {
         ingCount.set(i, (ingCount.get(i) || 0) + 1);
       });
       (r.categories || []).forEach((c) => catSet.add(c));
@@ -242,7 +242,7 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
         selectedFilters.every((filter) => {
           switch (filter.type) {
             case 'ingredient':
-              return (recipe.ingredientsStandardised || recipe.ingredients || [])
+              return (recipe.ingredients || [])
                 .some((i) => i.toLowerCase().includes(filter.value.toLowerCase()));
             case 'category':
               return (recipe.categories || []).includes(filter.value);
