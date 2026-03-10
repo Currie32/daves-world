@@ -19,7 +19,7 @@ export default function Home() {
           margin: 0,
           fontFamily: 'var(--font-body)',
         }}>
-          David Currie — curious person, home cook, music lover.
+          Dave's World, Dave's World. Vibe coding time, excellent.
         </p>
         <div style={{
           marginTop: '1.5rem',

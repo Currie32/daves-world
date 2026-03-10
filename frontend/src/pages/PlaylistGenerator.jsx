@@ -223,12 +223,14 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
   }
 
   async function searchAndAdd(query, score, source, provenance) {
-    // Paginate to get more results (Dev Mode caps at 10 per request)
-    for (let offset = 0; offset < 30; offset += 10) {
+    // Use random offsets to sample different parts of the result set each time
+    const startOffset = Math.floor(Math.random() * 50) * 10; // 0–490 in steps of 10
+    for (let i = 0; i < 3; i++) {
+      const offset = startOffset + i * 10;
       try {
         const data = await spGet(`/search?q=${encodeURIComponent(query)}&type=track&limit=10&offset=${offset}`, token);
         const items = data.tracks?.items || [];
-        items.forEach(t => addToPool(t, score - offset * 0.01, source, provenance));
+        items.forEach(t => addToPool(t, score - i * 0.01, source, provenance));
         if (items.length < 10) break;
       } catch { break; }
     }
@@ -261,8 +263,8 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
 
     const searchTasks = [];
     for (const seed of seedArtists) {
-      // Run searchDepth strategies per artist
-      const strategies = artistSearchStrategies.slice(0, searchDepth);
+      // Run searchDepth strategies per artist, randomly picked for variety
+      const strategies = shuffle([...artistSearchStrategies]).slice(0, searchDepth);
       for (const strategyFn of strategies) {
         const strategy = strategyFn(seed.name, mood);
         if (!strategy) continue;
@@ -281,6 +283,11 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
   // Phase 2: Genre-based search (multiple varied queries per genre)
   if (genres.length > 0) {
     onProgress?.('Searching genres...');
+    const genreModifiers = [
+      'new', 'best', 'underground', 'latest', 'classic', 'emerging',
+      'essential', 'fresh', 'deep cuts', 'hidden gems', 'rising',
+      'overlooked', 'acclaimed', 'vibrant', 'raw', 'authentic',
+    ];
     const genreTasks = [];
     for (const genre of genres) {
       // Base genre search
@@ -291,10 +298,11 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
       if (mood && MOOD_KEYWORDS[mood]) {
         genreTasks.push(() => searchAndAdd(`${genre} ${MOOD_KEYWORDS[mood]}`, 1.5, `genre:${genre}`, `genre: ${genre} + ${mood}`));
       }
-      // Genre + varied descriptors for more diversity
-      genreTasks.push(() => searchAndAdd(`${genre} new`, 1, `genre:${genre}`, `genre: ${genre}`));
-      genreTasks.push(() => searchAndAdd(`${genre} best`, 1, `genre:${genre}`, `genre: ${genre}`));
-      genreTasks.push(() => searchAndAdd(`${genre} underground`, 0.8, `genre:${genre}`, `genre: ${genre}`));
+      // Pick 3 random modifiers for variety each generation
+      const picked = shuffle([...genreModifiers]).slice(0, 3);
+      for (const mod of picked) {
+        genreTasks.push(() => searchAndAdd(`${genre} ${mod}`, 1, `genre:${genre}`, `genre: ${genre}`));
+      }
     }
     await batchedAll(genreTasks, 5);
   }
@@ -356,8 +364,7 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
 function useSpotifyPlayer(token) {
   const [player, setPlayer] = useState(null);
   const [deviceId, setDeviceId] = useState(null);
-  const [playerState, setPlayerState] = useState(null); // { paused, position, duration, track_name }
-  const onTrackEndRef = useRef(null);
+  const [playerState, setPlayerState] = useState(null);
   const lastTrackUriRef = useRef(null);
 
   useEffect(() => {
@@ -393,10 +400,6 @@ function useSpotifyPlayer(token) {
           duration: state.duration,
           trackUri: currentUri,
         });
-        // Detect track end: paused, position 0, and we were playing something
-        if (state.paused && state.position === 0 && lastTrackUriRef.current && currentUri === lastTrackUriRef.current) {
-          onTrackEndRef.current?.();
-        }
         if (!state.paused) {
           lastTrackUriRef.current = currentUri;
         }
@@ -416,18 +419,28 @@ function useSpotifyPlayer(token) {
       window.onSpotifyWebPlaybackSDKReady = onReady;
     }
 
+    // Reconnect player when page becomes visible again (e.g. phone screen unlocked)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && p) {
+        p.connect();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (p) { p.disconnect(); setPlayer(null); setDeviceId(null); }
     };
   }, [token]);
 
-  const play = useCallback(async (uri) => {
+  const play = useCallback(async (uris, offset = 0) => {
     if (!deviceId || !token) return;
-    lastTrackUriRef.current = uri;
+    const uriList = Array.isArray(uris) ? uris : [uris];
+    lastTrackUriRef.current = uriList[offset] || uriList[0];
     await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uris: [uri] }),
+      body: JSON.stringify({ uris: uriList, offset: { position: offset } }),
     });
   }, [deviceId, token]);
 
@@ -435,7 +448,7 @@ function useSpotifyPlayer(token) {
     if (player) player.togglePlay();
   }, [player]);
 
-  return { deviceId, playerState, play, togglePlay, onTrackEndRef };
+  return { deviceId, playerState, play, togglePlay };
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -827,27 +840,27 @@ export default function PlaylistGenerator() {
   const [playbackStarted, setPlaybackStarted] = useState(false);
   const [feedback, setFeedback] = useState(loadFeedback);
 
-  const { deviceId, playerState, play, togglePlay, onTrackEndRef } = useSpotifyPlayer(token);
+  const { deviceId, playerState, play, togglePlay } = useSpotifyPlayer(token);
 
   const activeTrack = tracks[activeTrackIdx] || null;
 
-  // Auto-advance to next track when current one ends
+  // Sync activeTrackIdx from Spotify's state (handles auto-advance and wake from sleep)
   useEffect(() => {
-    onTrackEndRef.current = () => {
-      setActiveTrackIdx(prev => {
-        const next = prev + 1;
-        if (next < tracks.length) return next;
-        return prev;
-      });
-    };
-  }, [tracks.length, onTrackEndRef]);
+    if (!playbackStarted || !playerState?.trackUri || !tracks.length) return;
+    const spotifyIdx = tracks.findIndex(t => t.uri === playerState.trackUri);
+    if (spotifyIdx >= 0 && spotifyIdx !== activeTrackIdx) {
+      prevIdxRef.current = spotifyIdx;
+      setActiveTrackIdx(spotifyIdx);
+    }
+  }, [playerState?.trackUri]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Play track when user-initiated index change occurs (only after playback has started)
   const prevIdxRef = useRef(-1);
   useEffect(() => {
     if (!playbackStarted || !deviceId || !activeTrack) return;
     if (activeTrackIdx !== prevIdxRef.current) {
-      play(activeTrack.uri);
+      const allUris = tracks.map(t => t.uri);
+      play(allUris, activeTrackIdx);
       prevIdxRef.current = activeTrackIdx;
     }
   }, [activeTrackIdx, playbackStarted, deviceId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -856,8 +869,8 @@ export default function PlaylistGenerator() {
     const i = idx ?? activeTrackIdx;
     setActiveTrackIdx(i);
     setPlaybackStarted(true);
-    const t = tracks[i];
-    if (t && deviceId) play(t.uri);
+    const allUris = tracks.map(t => t.uri);
+    if (allUris.length && deviceId) play(allUris, i);
   }
 
   useEffect(() => {

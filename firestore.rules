@@ -4,7 +4,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
     match /recommendations/{doc} {
       allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == "";
+      allow write: if request.auth != null && request.auth.uid == "8THLJbKP0qRINQ5RqjoUKIMtdVY2";
     }
     match /website_recipes/{doc} {
       allow read: if true;

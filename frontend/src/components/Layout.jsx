@@ -1,9 +1,12 @@
+import { Link, useLocation } from 'react-router-dom';
 import { signInWithPopup, signOut, GoogleAuthProvider } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
 
 export default function Layout({ children }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
+  const isHome = location.pathname === '/';
 
   function handleSignIn() {
     signInWithPopup(auth, new GoogleAuthProvider()).catch(() => {});
@@ -15,6 +18,25 @@ export default function Layout({ children }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      {!isHome && (
+        <nav style={{
+          padding: '0.75rem 1.5rem',
+          borderBottom: '1px solid var(--color-border)',
+        }}>
+          <Link to="/" style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: '1.1rem',
+            color: 'var(--color-text)',
+            textDecoration: 'none',
+            transition: 'color 0.15s',
+          }}
+            onMouseEnter={e => e.target.style.color = 'var(--color-accent)'}
+            onMouseLeave={e => e.target.style.color = 'var(--color-text)'}
+          >
+            Dave's World
+          </Link>
+        </nav>
+      )}
       <div style={{ flex: 1 }}>{children}</div>
       <footer style={{
         borderTop: '1px solid var(--color-border)',

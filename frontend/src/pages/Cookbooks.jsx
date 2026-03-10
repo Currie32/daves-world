@@ -177,7 +177,7 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
     const ingCount = new Map();
     const catSet = new Set();
     allRecipes.forEach((r) => {
-      (r.ingredients || r.ingredientsStandardised || []).forEach((i) => {
+      (r.ingredientsStandardised || r.ingredients || []).forEach((i) => {
         ingCount.set(i, (ingCount.get(i) || 0) + 1);
       });
       (r.categories || []).forEach((c) => catSet.add(c));
@@ -242,7 +242,7 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
         selectedFilters.every((filter) => {
           switch (filter.type) {
             case 'ingredient':
-              return (recipe.ingredients || [])
+              return (recipe.ingredientsStandardised || recipe.ingredients || [])
                 .some((i) => i.toLowerCase().includes(filter.value.toLowerCase()));
             case 'category':
               return (recipe.categories || []).includes(filter.value);
@@ -420,8 +420,8 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
         <>
           <p style={styles.resultsCount}>{recipeResults.length} recipe{recipeResults.length !== 1 ? 's' : ''}</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
-            {recipeResults.slice(0, 200).map((r) => (
-              <RecipeCard key={r.id} recipe={r} />
+            {recipeResults.slice(0, 200).map((r, idx) => (
+              <RecipeCard key={`${r.id}-${idx}`} recipe={r} />
             ))}
             {recipeResults.length > 200 && (
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
