@@ -27,6 +27,8 @@ firestore.rules      # Firestore security rules
 | `/playlist-generator` | PlaylistGenerator.jsx | Spotify music discovery with playback + feedback |
 | `/recommendations` | Recommendations.jsx | Curated recommendations with map + admin CRUD |
 | `/weather-forecast` | WeatherForecast.jsx | Ensemble weather forecast with uncertainty viz |
+| `/movie-finder` | MovieFinder.jsx | Movie discovery by mood/taste with streaming availability |
+| `/trail-poster` | TrailPoster.jsx | Trail poster maker with MapLibre GL, contour lines, export |
 
 ## Design System
 
@@ -41,6 +43,8 @@ firestore.rules      # Firestore security rules
 - `VITE_SPOTIFY_CLIENT_ID` — Spotify PKCE auth
 - `VITE_GOOGLE_MAPS_API_KEY` — Google Places autocomplete
 - `VITE_ADMIN_UID` — Firebase UID for admin-only features
+- `VITE_TMDB_API_KEY` — TMDB API key for movie discovery
+- `VITE_MAPTILER_API_KEY` — MapTiler API key for contour tiles (Trail Poster)
 
 ## External Services
 
@@ -49,6 +53,9 @@ firestore.rules      # Firestore security rules
 - **Google Places API**: Address autocomplete in Recommendations
 - **Open-Meteo**: Ensemble weather forecast API (no auth needed)
 - **Leaflet/OpenStreetMap**: Map display in Recommendations
+- **TMDB**: Movie database API (discover, recommendations, watch providers)
+- **MapLibre GL + OpenFreeMap**: Vector tile map rendering for Trail Poster (no API key needed)
+- **MapTiler**: Contour tile source for elevation lines in Trail Poster (free tier, requires API key)
 
 ## Commands
 

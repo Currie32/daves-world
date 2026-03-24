@@ -30,5 +30,21 @@
     "emoji": "🌤️",
     "route": "/weather-forecast",
     "comingSoon": false
+  },
+  {
+    "id": "movie-finder",
+    "title": "Movie Finder",
+    "description": "Discover movies based on mood and taste.",
+    "emoji": "🎬",
+    "route": "/movie-finder",
+    "comingSoon": false
+  },
+  {
+    "id": "trail-poster",
+    "title": "Trail Poster Maker",
+    "description": "Create printable art from your favorite trails.",
+    "emoji": "🥾",
+    "route": "/trail-poster",
+    "comingSoon": false
   }
 ]
