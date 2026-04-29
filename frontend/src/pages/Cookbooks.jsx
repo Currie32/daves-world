@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { collection, getDocs, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, deleteDoc, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { app, db } from '../lib/firebase';
 import PageHeader from '../components/PageHeader';
@@ -8,6 +8,7 @@ import SearchInput from '../components/SearchInput';
 import TagPill from '../components/TagPill';
 import EmptyState from '../components/EmptyState';
 import { createSearch, search } from '../lib/fuzzySearch';
+import { useAuth } from '../hooks/useAuth';
 import cookbooksIndex from '../data/cookbooks-index.json';
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ function pillsFrom(items, limit = 3) {
 
 // ─── CookbookCard ─────────────────────────────────────────────────────────────
 
-function CookbookCard({ book, onClick }) {
+function CookbookCard({ book, onClick, owned, onToggleOwned }) {
   const { hovered, ...hoverProps } = useHover();
   return (
     <div
@@ -129,16 +130,50 @@ function CookbookCard({ book, onClick }) {
       <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
         {book.author} · {book.recipeCount} recipes
       </p>
+      <button
+        onClick={(e) => { e.stopPropagation(); onToggleOwned(book.id); }}
+        style={{
+          padding: '0.2rem 0.6rem',
+          background: owned ? 'var(--color-accent)' : 'transparent',
+          border: `1px solid ${owned ? 'var(--color-accent)' : 'var(--color-border)'}`,
+          borderRadius: '999px',
+          fontFamily: 'var(--font-body)',
+          fontSize: '0.75rem',
+          fontWeight: owned ? 600 : 400,
+          color: owned ? '#fff' : 'var(--color-text-muted)',
+          cursor: 'pointer',
+        }}
+      >
+        {owned ? '✓ Owned' : '+ Own'}
+      </button>
     </div>
   );
 }
 
 // ─── RecipeCard ───────────────────────────────────────────────────────────────
 
-function RecipeCard({ recipe }) {
+function RecipeCard({ recipe, userPrefs, onLike, onDislike }) {
   const author = cookbooksIndex.find((b) => b.id === recipe.bookId)?.author;
+  const isLiked = userPrefs?.liked.some((r) => r.recipeId === recipe.id && r.source === 'cookbook');
+  const isDisliked = userPrefs?.disliked.some((r) => r.recipeId === recipe.id && r.source === 'cookbook');
+
+  const actionBtn = (active, activeColor) => ({
+    padding: '0.2rem 0.6rem',
+    background: active ? activeColor : 'transparent',
+    border: `1px solid ${active ? activeColor : 'var(--color-border)'}`,
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '0.78rem',
+    fontWeight: active ? 600 : 400,
+    color: active ? '#fff' : 'var(--color-text-muted)',
+    fontFamily: 'var(--font-body)',
+  });
+
   return (
-    <div style={styles.recipeCard}>
+    <div style={{
+      ...styles.recipeCard,
+      borderLeft: `4px solid ${isLiked ? '#27ae60' : isDisliked ? '#c0392b' : 'var(--color-accent)'}`,
+    }}>
       <h3 style={{ margin: '0 0 0.2rem', fontSize: '0.95rem', fontFamily: 'var(--font-display)' }}>
         {recipe.title}
       </h3>
@@ -146,9 +181,15 @@ function RecipeCard({ recipe }) {
         {recipe.book}{author ? ` · ${author}` : ''}
         {recipe.page ? ` · p. ${recipe.page}` : ''}
       </p>
-      <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+      <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
         {recipe.ingredients.join(', ')}
       </p>
+      {onLike && (
+        <div style={{ display: 'flex', gap: '0.4rem' }}>
+          <button onClick={() => onLike(recipe)} style={actionBtn(isLiked, '#27ae60')}>👍 Like</button>
+          <button onClick={() => onDislike(recipe)} style={actionBtn(isDisliked, '#c0392b')}>👎 Dislike</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -162,7 +203,44 @@ const TYPE_LABEL = {
   author: 'Author',
 };
 
-function CookbookIndex({ onSelectBook, allRecipes }) {
+function makeCookbookEntry(recipe) {
+  return {
+    recipeId: recipe.id,
+    source: 'cookbook',
+    title: recipe.title,
+    categories: recipe.categories || [],
+    ingredientsStandardised: recipe.ingredientsStandardised || recipe.ingredients || [],
+  };
+}
+
+function useCookbookLikeHandlers(userPrefs, savePrefs) {
+  function handleLike(recipe) {
+    const entry = makeCookbookEntry(recipe);
+    const key = (r) => r.recipeId === recipe.id && r.source === 'cookbook';
+    const alreadyLiked = userPrefs.liked.some(key);
+    savePrefs({
+      ...userPrefs,
+      liked: alreadyLiked ? userPrefs.liked.filter((r) => !key(r)) : [...userPrefs.liked.filter((r) => !key(r)), entry],
+      disliked: userPrefs.disliked.filter((r) => !key(r)),
+    });
+  }
+
+  function handleDislike(recipe) {
+    const entry = makeCookbookEntry(recipe);
+    const key = (r) => r.recipeId === recipe.id && r.source === 'cookbook';
+    const alreadyDisliked = userPrefs.disliked.some(key);
+    savePrefs({
+      ...userPrefs,
+      disliked: alreadyDisliked ? userPrefs.disliked.filter((r) => !key(r)) : [...userPrefs.disliked.filter((r) => !key(r)), entry],
+      liked: userPrefs.liked.filter((r) => !key(r)),
+    });
+  }
+
+  return { handleLike, handleDislike };
+}
+
+function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
+  const { handleLike, handleDislike } = useCookbookLikeHandlers(userPrefs, savePrefs);
   const [query, setQuery] = useState('');
   const [activeCuisine, setActiveCuisine] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -409,7 +487,19 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
           <p style={styles.resultsCount}>{cookbooksIndex.length} cookbook{cookbooksIndex.length !== 1 ? 's' : ''}</p>
           <div style={styles.grid}>
             {cookbooksIndex.map((book) => (
-              <CookbookCard key={book.id} book={book} onClick={() => onSelectBook(book.id)} />
+              <CookbookCard
+                key={book.id}
+                book={book}
+                onClick={() => onSelectBook(book.id)}
+                owned={(userPrefs?.ownedBooks || []).includes(book.id)}
+                onToggleOwned={(id) => {
+                  const owned = userPrefs?.ownedBooks || [];
+                  savePrefs({
+                    ...userPrefs,
+                    ownedBooks: owned.includes(id) ? owned.filter((b) => b !== id) : [...owned, id],
+                  });
+                }}
+              />
             ))}
           </div>
         </>
@@ -421,7 +511,7 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
           <p style={styles.resultsCount}>{recipeResults.length} recipe{recipeResults.length !== 1 ? 's' : ''}</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
             {recipeResults.slice(0, 200).map((r, idx) => (
-              <RecipeCard key={`${r.id}-${idx}`} recipe={r} />
+              <RecipeCard key={`${r.id}-${idx}`} recipe={r} userPrefs={userPrefs} onLike={handleLike} onDislike={handleDislike} />
             ))}
             {recipeResults.length > 200 && (
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -438,7 +528,8 @@ function CookbookIndex({ onSelectBook, allRecipes }) {
 
 // ─── RecipeBrowser ────────────────────────────────────────────────────────────
 
-function RecipeBrowser({ bookId, onBack, allRecipes }) {
+function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
+  const { handleLike, handleDislike } = useCookbookLikeHandlers(userPrefs, savePrefs);
   const [query, setQuery] = useState('');
 
   const book = bookId ? cookbooksIndex.find((b) => b.id === bookId) : null;
@@ -495,7 +586,7 @@ function RecipeBrowser({ bookId, onBack, allRecipes }) {
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
         {results.slice(0, 200).map((r) => (
-          <RecipeCard key={r.id} recipe={r} />
+          <RecipeCard key={r.id} recipe={r} userPrefs={userPrefs} onLike={handleLike} onDislike={handleDislike} />
         ))}
         {results.length > 200 && (
           <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -892,12 +983,335 @@ function WebRecipes() {
   );
 }
 
+// ─── Recommendations ──────────────────────────────────────────────────────────
+
+const MAIN_MEAL_CATEGORIES = new Set([
+  'main course', 'dinner', 'lunch', 'one-pot meal',
+  'cooking for a crowd', 'cooking for 1-2', 'cooking ahead',
+]);
+
+const DEPRIORITIZED_CATEGORIES = new Set([
+  'dip', 'spread', 'salsa', 'side dish',
+]);
+
+function scoreRecipes(cookbookRecipes, webRecipes, userPrefs, jitterSeed) {
+  const { liked = [], disliked = [], cookedHistory = [], ownedBooks = [] } = userPrefs;
+  const ownedBookSet = new Set(ownedBooks);
+
+  const likedIng = new Map();
+  const likedCat = new Map();
+  const dislikedIng = new Map();
+  const dislikedCat = new Map();
+
+  liked.forEach((r) => {
+    (r.ingredientsStandardised || []).forEach((i) => likedIng.set(i, (likedIng.get(i) || 0) + 1));
+    (r.categories || []).forEach((c) => likedCat.set(c, (likedCat.get(c) || 0) + 1));
+  });
+  disliked.forEach((r) => {
+    (r.ingredientsStandardised || []).forEach((i) => dislikedIng.set(i, (dislikedIng.get(i) || 0) + 1));
+    (r.categories || []).forEach((c) => dislikedCat.set(c, (dislikedCat.get(c) || 0) + 1));
+  });
+
+  const cookedSet = new Set(cookedHistory.map((r) => `${r.source}:${r.recipeId}`));
+
+  const candidates = [
+    ...cookbookRecipes.map((r) => ({
+      ...r,
+      _source: 'cookbook',
+      _ingredients: r.ingredientsStandardised || r.ingredients || [],
+      _categories: r.categories || [],
+    })),
+    ...webRecipes.map((r) => ({
+      ...r,
+      _source: 'web',
+      _ingredients: r.ingredients || [],
+      _categories: r.tags || [],
+    })),
+  ];
+
+  return candidates
+    .map((recipe, i) => {
+      const ings = recipe._ingredients;
+      const cats = recipe._categories;
+      const uid = `${recipe._source}:${recipe.id}`;
+
+      const isMain = cats.some((c) => MAIN_MEAL_CATEGORIES.has(c.toLowerCase()));
+      const isDeprioritized = cats.some((c) => DEPRIORITIZED_CATEGORIES.has(c.toLowerCase()));
+      const baseScore = isMain ? 1.0 : isDeprioritized ? 0.1 : 0.5;
+
+      const ingLen = Math.max(ings.length, 1);
+      const catLen = Math.max(cats.length, 1);
+
+      const likeIngOverlap = ings.filter((i) => likedIng.has(i)).length / ingLen;
+      const likeCatOverlap = cats.filter((c) => likedCat.has(c)).length / catLen;
+      const likeScore = liked.length > 0 ? 0.6 * likeIngOverlap + 0.4 * likeCatOverlap : 0;
+
+      const dislikeIngOverlap = ings.filter((i) => dislikedIng.has(i)).length / ingLen;
+      const dislikeCatOverlap = cats.filter((c) => dislikedCat.has(c)).length / catLen;
+      const dislikeScore = disliked.length > 0 ? 0.6 * dislikeIngOverlap + 0.4 * dislikeCatOverlap : 0;
+
+      const recencyPenalty = cookedSet.has(uid) ? -0.5 : 0;
+      const ownedBoost = recipe._source === 'cookbook' && ownedBookSet.has(recipe.bookId) ? 0.3 : 0;
+      const fewIngredientsPenalty = ings.length < 4 ? -0.4 : ings.length < 6 ? -0.2 : 0;
+      const jitter = Math.sin(i * 7.3 + jitterSeed * 1000) * 0.05;
+
+      return {
+        ...recipe,
+        _score: baseScore + ownedBoost + 1.5 * likeScore - dislikeScore + recencyPenalty + fewIngredientsPenalty + jitter,
+        _recentlyCooked: cookedSet.has(uid),
+      };
+    })
+    .sort((a, b) => b._score - a._score)
+    .slice(0, 100);
+}
+
+function makeRecipeEntry(recipe) {
+  return {
+    recipeId: recipe.id,
+    source: recipe._source,
+    title: recipe.title || 'Untitled',
+    categories: recipe._categories || [],
+    ingredientsStandardised: recipe._ingredients || [],
+  };
+}
+
+function RecommendationCard({ recipe, userPrefs, onLike, onDislike, onCooked }) {
+  const isLiked = userPrefs.liked.some((r) => r.recipeId === recipe.id && r.source === recipe._source);
+  const isDisliked = userPrefs.disliked.some((r) => r.recipeId === recipe.id && r.source === recipe._source);
+
+  const sourceLabel = recipe._source === 'cookbook'
+    ? `${recipe.book}${recipe.page ? ` · p.${recipe.page}` : ''}`
+    : (recipe.source || recipe.host || 'Web');
+
+  const actionBtn = (active, activeColor) => ({
+    padding: '0.3rem 0.65rem',
+    background: active ? activeColor : 'transparent',
+    border: `1px solid ${active ? activeColor : 'var(--color-border)'}`,
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '0.82rem',
+    fontWeight: active ? 600 : 400,
+    color: active ? '#fff' : 'var(--color-text-muted)',
+    fontFamily: 'var(--font-body)',
+    whiteSpace: 'nowrap',
+  });
+
+  return (
+    <div style={{
+      background: 'var(--color-surface)',
+      border: '1px solid var(--color-border)',
+      borderLeft: `4px solid ${isLiked ? '#27ae60' : isDisliked ? '#c0392b' : 'var(--color-accent)'}`,
+      borderRadius: '8px',
+      padding: '1rem 1.25rem',
+      opacity: recipe._recentlyCooked ? 0.6 : 1,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ margin: '0 0 0.15rem', fontSize: '0.95rem', fontFamily: 'var(--font-display)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {recipe.title}
+          </h3>
+          <p style={{ margin: '0 0 0.5rem', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+            {sourceLabel}
+          </p>
+          {recipe._categories.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.4rem' }}>
+              {recipe._categories.slice(0, 3).map((c) => (
+                <TagPill key={c} label={c} />
+              ))}
+            </div>
+          )}
+          {recipe._ingredients.length > 0 && (
+            <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+              {recipe._ingredients.join(', ')}
+            </p>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0, alignItems: 'center' }}>
+          <button onClick={() => onLike(recipe)} title="Like" style={actionBtn(isLiked, '#27ae60')}>
+            👍 Like
+          </button>
+          <button onClick={() => onDislike(recipe)} title="Dislike" style={actionBtn(isDisliked, '#c0392b')}>
+            👎 Dislike
+          </button>
+          <button
+            onClick={() => onCooked(recipe)}
+            title={recipe._recentlyCooked ? 'Remove from history' : 'Mark as cooked'}
+            style={actionBtn(recipe._recentlyCooked, 'var(--color-accent)')}
+          >
+            {recipe._recentlyCooked ? '✓ Made it' : '🍳 Made it'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecommendationsTab({ allRecipes, userPrefs, savePrefs, loadingPrefs, user }) {
+  const [webRecipes, setWebRecipes] = useState([]);
+  const [jitterSeed, setJitterSeed] = useState(() => Math.random());
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+
+  useEffect(() => {
+    getDocs(collection(db, 'website_recipes'))
+      .then((snap) => setWebRecipes(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
+      .catch(() => {});
+  }, []);
+
+  function handleLike(recipe) {
+    const entry = makeRecipeEntry(recipe);
+    const key = (r) => r.recipeId === recipe.id && r.source === recipe._source;
+    const alreadyLiked = userPrefs.liked.some(key);
+    savePrefs({
+      ...userPrefs,
+      liked: alreadyLiked
+        ? userPrefs.liked.filter((r) => !key(r))
+        : [...userPrefs.liked.filter((r) => !key(r)), entry],
+      disliked: userPrefs.disliked.filter((r) => !key(r)),
+    });
+  }
+
+  function handleDislike(recipe) {
+    const entry = makeRecipeEntry(recipe);
+    const key = (r) => r.recipeId === recipe.id && r.source === recipe._source;
+    const alreadyDisliked = userPrefs.disliked.some(key);
+    savePrefs({
+      ...userPrefs,
+      disliked: alreadyDisliked
+        ? userPrefs.disliked.filter((r) => !key(r))
+        : [...userPrefs.disliked.filter((r) => !key(r)), entry],
+      liked: userPrefs.liked.filter((r) => !key(r)),
+    });
+  }
+
+  function handleCooked(recipe) {
+    const key = (r) => r.recipeId === recipe.id && r.source === recipe._source;
+    const alreadyCooked = userPrefs.cookedHistory.some(key);
+    const newHistory = alreadyCooked
+      ? userPrefs.cookedHistory.filter((r) => !key(r))
+      : [
+          { recipeId: recipe.id, source: recipe._source, title: recipe.title || 'Untitled', cookedAt: new Date().toISOString() },
+          ...userPrefs.cookedHistory,
+        ].slice(0, 10);
+    savePrefs({ ...userPrefs, cookedHistory: newHistory });
+  }
+
+  function removeFromHistory(entry) {
+    savePrefs({
+      ...userPrefs,
+      cookedHistory: userPrefs.cookedHistory.filter(
+        (r) => !(r.recipeId === entry.recipeId && r.source === entry.source)
+      ),
+    });
+  }
+
+  const scored = useMemo(() => {
+    if (!allRecipes || allRecipes.length === 0) return [];
+    return scoreRecipes(allRecipes, webRecipes, userPrefs, jitterSeed);
+  }, [allRecipes, webRecipes, userPrefs, jitterSeed]);
+
+  if (!allRecipes || loadingPrefs) {
+    return <p style={{ color: 'var(--color-text-muted)' }}>Loading recommendations…</p>;
+  }
+
+  const historyCount = userPrefs.cookedHistory.length;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+        <button
+          onClick={() => setJitterSeed(Math.random())}
+          style={{
+            padding: '0.5rem 1.1rem',
+            background: 'var(--color-accent)',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '8px',
+            fontFamily: 'var(--font-body)',
+            fontSize: '0.9rem',
+            fontWeight: 500,
+            cursor: 'pointer',
+          }}
+        >
+          Shuffle
+        </button>
+        {historyCount > 0 && (
+          <button
+            onClick={() => setHistoryExpanded((e) => !e)}
+            style={{
+              padding: '0.4rem 0.85rem',
+              background: 'transparent',
+              border: '1px solid var(--color-border)',
+              borderRadius: '999px',
+              fontFamily: 'var(--font-body)',
+              fontSize: '0.82rem',
+              color: 'var(--color-text-muted)',
+              cursor: 'pointer',
+            }}
+          >
+            {historyCount} meal{historyCount !== 1 ? 's' : ''} cooked {historyExpanded ? '▲' : '▼'}
+          </button>
+        )}
+        {!user && (
+          <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+            Sign in to save your preferences
+          </p>
+        )}
+      </div>
+
+      {historyExpanded && historyCount > 0 && (
+        <div style={{
+          background: 'var(--color-bg)',
+          border: '1px solid var(--color-border)',
+          borderRadius: '8px',
+          padding: '1rem',
+          marginBottom: '1.5rem',
+        }}>
+          <p style={{ margin: '0 0 0.75rem', fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            Recently Cooked
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {userPrefs.cookedHistory.map((entry) => (
+              <div key={`${entry.source}:${entry.recipeId}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.88rem' }}>{entry.title}</span>
+                <button
+                  onClick={() => removeFromHistory(entry)}
+                  style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: '0.85rem', padding: '0.2rem 0.5rem' }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <p style={styles.resultsCount}>Top {scored.length} recommendations</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+        {scored.map((recipe) => (
+          <RecommendationCard
+            key={`${recipe._source}:${recipe.id}`}
+            recipe={recipe}
+            userPrefs={userPrefs}
+            onLike={handleLike}
+            onDislike={handleDislike}
+            onCooked={handleCooked}
+          />
+        ))}
+      </div>
+      {scored.length === 0 && <EmptyState message="No recipes found." />}
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Cookbooks() {
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState('cookbooks');
   const [allRecipes, setAllRecipes] = useState(null);
+  const [userPrefs, setUserPrefs] = useState({ liked: [], disliked: [], cookedHistory: [], ownedBooks: [] });
+  const [loadingPrefs, setLoadingPrefs] = useState(true);
   const bookId = searchParams.get('book');
 
   useEffect(() => {
@@ -906,6 +1320,25 @@ export default function Cookbooks() {
       .then(setAllRecipes)
       .catch(() => setAllRecipes([]));
   }, []);
+
+  useEffect(() => {
+    if (!user) { setLoadingPrefs(false); return; }
+    getDoc(doc(db, 'user_prefs', user.uid))
+      .then((snap) => { if (snap.exists()) setUserPrefs(snap.data()); })
+      .catch((err) => console.error('Failed to load prefs:', err))
+      .finally(() => setLoadingPrefs(false));
+  }, [user]);
+
+  async function savePrefs(newPrefs) {
+    setUserPrefs(newPrefs);
+    if (user) {
+      try {
+        await setDoc(doc(db, 'user_prefs', user.uid), newPrefs);
+      } catch (err) {
+        console.error('Failed to save prefs:', err);
+      }
+    }
+  }
 
   function selectBook(id) {
     setSearchParams({ book: id });
@@ -936,14 +1369,29 @@ export default function Cookbooks() {
         >
           Saved from Web
         </button>
+        <button
+          style={styles.tab(activeTab === 'recommendations')}
+          onClick={() => setActiveTab('recommendations')}
+        >
+          Recommendations
+        </button>
       </div>
 
       {activeTab === 'cookbooks' && (
         bookId
-          ? <RecipeBrowser bookId={bookId} onBack={clearBook} allRecipes={allRecipes} />
-          : <CookbookIndex onSelectBook={selectBook} allRecipes={allRecipes} />
+          ? <RecipeBrowser bookId={bookId} onBack={clearBook} allRecipes={allRecipes} userPrefs={userPrefs} savePrefs={savePrefs} />
+          : <CookbookIndex onSelectBook={selectBook} allRecipes={allRecipes} userPrefs={userPrefs} savePrefs={savePrefs} />
       )}
       {activeTab === 'web' && <WebRecipes />}
+      {activeTab === 'recommendations' && (
+        <RecommendationsTab
+          allRecipes={allRecipes}
+          userPrefs={userPrefs}
+          savePrefs={savePrefs}
+          loadingPrefs={loadingPrefs}
+          user={user}
+        />
+      )}
     </div>
   );
 }
