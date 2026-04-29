@@ -187,7 +187,7 @@ function RecipeCard({ recipe, userPrefs, onLike, onDislike }) {
       {onLike && (
         <div style={{ display: 'flex', gap: '0.4rem' }}>
           <button onClick={() => onLike(recipe)} style={actionBtn(isLiked, '#27ae60')}>👍 Like</button>
-          <button onClick={() => onDislike(recipe)} style={actionBtn(isDisliked, '#c0392b')}>👎 Dislike</button>
+          <button onClick={() => onDislike(recipe)} style={actionBtn(isDisliked, '#c0392b')}>😐 Meh</button>
         </div>
       )}
     </div>
@@ -1130,8 +1130,8 @@ function RecommendationCard({ recipe, userPrefs, onLike, onDislike, onCooked }) 
           <button onClick={() => onLike(recipe)} title="Like" style={actionBtn(isLiked, '#27ae60')}>
             👍 Like
           </button>
-          <button onClick={() => onDislike(recipe)} title="Dislike" style={actionBtn(isDisliked, '#c0392b')}>
-            👎 Dislike
+          <button onClick={() => onDislike(recipe)} title="Meh" style={actionBtn(isDisliked, '#c0392b')}>
+            😐 Meh
           </button>
           <button
             onClick={() => onCooked(recipe)}

@@ -73,7 +73,7 @@ def main():
         })
 
         for i, recipe in enumerate(recipes):
-            recipe_id = f"{book_id}-{recipe.get('page', i)}"
+            recipe_id = f"{book_id}-{slugify(recipe.get('title', str(i)))}"
             all_recipes.append({
                 "id": recipe_id,
                 "title": recipe.get("title", ""),
