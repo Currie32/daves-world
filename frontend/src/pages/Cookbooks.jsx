@@ -150,9 +150,127 @@ function CookbookCard({ book, onClick, owned, onToggleOwned }) {
   );
 }
 
+// ─── RecipeTags ───────────────────────────────────────────────────────────────
+
+function RecipeTags({ recipeId, userPrefs, savePrefs }) {
+  const [adding, setAdding] = useState(false);
+  const [input, setInput] = useState('');
+  const inputRef = useRef(null);
+
+  const tags = userPrefs?.recipeTags?.[recipeId] || [];
+
+  const allTags = useMemo(() => {
+    const set = new Set();
+    Object.values(userPrefs?.recipeTags || {}).forEach((t) => t.forEach((tag) => set.add(tag)));
+    return [...set].sort();
+  }, [userPrefs?.recipeTags]);
+
+  const suggestions = allTags.filter(
+    (t) => t.includes(input.toLowerCase().trim()) && !tags.includes(t)
+  );
+
+  useEffect(() => {
+    if (adding) inputRef.current?.focus();
+  }, [adding]);
+
+  function commitTag(tag) {
+    const trimmed = tag.toLowerCase().trim();
+    if (!trimmed || tags.includes(trimmed)) { cancel(); return; }
+    const updated = { ...(userPrefs.recipeTags || {}), [recipeId]: [...tags, trimmed] };
+    savePrefs({ ...userPrefs, recipeTags: updated });
+    cancel();
+  }
+
+  function removeTag(tag) {
+    const remaining = tags.filter((t) => t !== tag);
+    const updated = { ...(userPrefs.recipeTags || {}) };
+    if (remaining.length === 0) delete updated[recipeId];
+    else updated[recipeId] = remaining;
+    savePrefs({ ...userPrefs, recipeTags: updated });
+  }
+
+  function cancel() {
+    setInput('');
+    setAdding(false);
+  }
+
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', alignItems: 'center', marginTop: '0.5rem' }}>
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+            padding: '0.15rem 0.5rem', borderRadius: '999px',
+            background: '#f0e8ff', border: '1px solid #c9aaff',
+            fontSize: '0.75rem', color: '#6b3fa0',
+          }}
+        >
+          {tag}
+          <button
+            onClick={() => removeTag(tag)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, lineHeight: 1, color: '#6b3fa0', fontSize: '0.7rem' }}
+          >✕</button>
+        </span>
+      ))}
+      {adding ? (
+        <div style={{ position: 'relative' }}>
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitTag(input);
+              if (e.key === 'Escape') cancel();
+            }}
+            placeholder="add tag…"
+            style={{
+              padding: '0.15rem 0.5rem', borderRadius: '999px',
+              border: '1px solid #c9aaff', fontSize: '0.75rem',
+              fontFamily: 'var(--font-body)', width: '90px', outline: 'none',
+            }}
+          />
+          {suggestions.length > 0 && (
+            <div style={{
+              position: 'absolute', top: '100%', left: 0, zIndex: 10,
+              background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+              borderRadius: '6px', marginTop: '2px', minWidth: '120px',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            }}>
+              {suggestions.slice(0, 6).map((s) => (
+                <div
+                  key={s}
+                  onMouseDown={() => commitTag(s)}
+                  style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', cursor: 'pointer' }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = 'var(--color-bg)'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                >
+                  {s}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          style={{
+            padding: '0.15rem 0.45rem', borderRadius: '999px',
+            background: 'transparent', border: '1px dashed var(--color-border)',
+            fontSize: '0.75rem', color: 'var(--color-text-muted)',
+            cursor: 'pointer', fontFamily: 'var(--font-body)',
+          }}
+        >
+          + tag
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── RecipeCard ───────────────────────────────────────────────────────────────
 
-function RecipeCard({ recipe, userPrefs, onLike, onDislike }) {
+function RecipeCard({ recipe, userPrefs, savePrefs, onLike, onDislike }) {
   const author = cookbooksIndex.find((b) => b.id === recipe.bookId)?.author;
   const isLiked = userPrefs?.liked.some((r) => r.recipeId === recipe.id && r.source === 'cookbook');
   const isDisliked = userPrefs?.disliked.some((r) => r.recipeId === recipe.id && r.source === 'cookbook');
@@ -184,8 +302,9 @@ function RecipeCard({ recipe, userPrefs, onLike, onDislike }) {
       <p style={{ margin: '0 0 0.5rem', fontSize: '0.82rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
         {recipe.ingredients.join(', ')}
       </p>
+      <RecipeTags recipeId={recipe.id} userPrefs={userPrefs} savePrefs={savePrefs} />
       {onLike && (
-        <div style={{ display: 'flex', gap: '0.4rem' }}>
+        <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.5rem' }}>
           <button onClick={() => onLike(recipe)} style={actionBtn(isLiked, '#27ae60')}>👍 Like</button>
           <button onClick={() => onDislike(recipe)} style={actionBtn(isDisliked, '#c0392b')}>😐 Meh</button>
         </div>
@@ -201,6 +320,7 @@ const TYPE_LABEL = {
   category: 'Category',
   book: 'Book',
   author: 'Author',
+  tag: 'Tag',
 };
 
 function makeCookbookEntry(recipe) {
@@ -294,7 +414,15 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
     return [...set].sort();
   }, []);
 
-  // Autocomplete suggestions: ingredients, categories, books, authors matching query
+  const tagOptions = useMemo(() => {
+    const count = new Map();
+    Object.values(userPrefs?.recipeTags || {}).forEach((tags) =>
+      tags.forEach((t) => count.set(t, (count.get(t) || 0) + 1))
+    );
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([v]) => v);
+  }, [userPrefs?.recipeTags]);
+
+  // Autocomplete suggestions: ingredients, categories, books, authors, tags matching query
   const suggestions = useMemo(() => {
     if (!query) return [];
     const q = query.toLowerCase();
@@ -309,8 +437,9 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
     add('ingredient', ingredientOptions, Infinity);
     add('book', bookOptions, Infinity);
     add('author', authorOptions, Infinity);
+    add('tag', tagOptions, Infinity);
     return results;
-  }, [query, ingredientOptions, categoryOptions, bookOptions, authorOptions, selectedFilters]);
+  }, [query, ingredientOptions, categoryOptions, bookOptions, authorOptions, tagOptions, selectedFilters]);
 
   // Recipe results: AND logic across all selected filters
   const recipeResults = useMemo(() => {
@@ -328,13 +457,15 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
               return recipe.book === filter.value;
             case 'author':
               return (authorToBookIds[filter.value] || new Set()).has(recipe.bookId);
+            case 'tag':
+              return (userPrefs?.recipeTags?.[recipe.id] || []).includes(filter.value);
             default:
               return true;
           }
         })
       )
       .sort((a, b) => a.ingredients.length - b.ingredients.length);
-  }, [allRecipes, selectedFilters, authorToBookIds]);
+  }, [allRecipes, selectedFilters, authorToBookIds, userPrefs?.recipeTags]);
 
   function addFilter(filter) {
     setSelectedFilters((prev) => {
@@ -374,7 +505,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
     <div>
       <div ref={containerRef} style={{ position: 'relative' }}>
         <SearchInput
-          placeholder="Filter by ingredient, category, book, or author…"
+          placeholder="Filter by ingredient, book, author, or tag…"
           value={query}
           onChange={(v) => { setQuery(v); setShowDropdown(true); setHighlightedIndex(0); }}
           onKeyDown={(e) => {
@@ -511,7 +642,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
           <p style={styles.resultsCount}>{recipeResults.length} recipe{recipeResults.length !== 1 ? 's' : ''}</p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
             {recipeResults.slice(0, 200).map((r, idx) => (
-              <RecipeCard key={`${r.id}-${idx}`} recipe={r} userPrefs={userPrefs} onLike={handleLike} onDislike={handleDislike} />
+              <RecipeCard key={`${r.id}-${idx}`} recipe={r} userPrefs={userPrefs} savePrefs={savePrefs} onLike={handleLike} onDislike={handleDislike} />
             ))}
             {recipeResults.length > 200 && (
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -536,11 +667,12 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
 
   const bookRecipes = useMemo(() => {
     if (!allRecipes) return [];
-    return bookId ? allRecipes.filter((r) => r.bookId === bookId) : allRecipes;
-  }, [allRecipes, bookId]);
+    const filtered = bookId ? allRecipes.filter((r) => r.bookId === bookId) : allRecipes;
+    return filtered.map((r) => ({ ...r, tags: userPrefs?.recipeTags?.[r.id] || [] }));
+  }, [allRecipes, bookId, userPrefs?.recipeTags]);
 
   const fuse = useMemo(
-    () => createSearch(bookRecipes, ['title', 'ingredients', 'ingredientsStandardised', 'categories', 'book']),
+    () => createSearch(bookRecipes, ['title', 'ingredients', 'ingredientsStandardised', 'categories', 'book', 'tags']),
     [bookRecipes]
   );
 
@@ -576,7 +708,7 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
         </div>
       )}
       <SearchInput
-        placeholder="Search by title, ingredient, or category…"
+        placeholder="Search by title, ingredient, category, or tag…"
         value={query}
         onChange={setQuery}
       />
@@ -586,7 +718,7 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
         {results.slice(0, 200).map((r) => (
-          <RecipeCard key={r.id} recipe={r} userPrefs={userPrefs} onLike={handleLike} onDislike={handleDislike} />
+          <RecipeCard key={r.id} recipe={r} userPrefs={userPrefs} savePrefs={savePrefs} onLike={handleLike} onDislike={handleDislike} />
         ))}
         {results.length > 200 && (
           <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -1075,7 +1207,7 @@ function makeRecipeEntry(recipe) {
   };
 }
 
-function RecommendationCard({ recipe, userPrefs, onLike, onDislike, onCooked }) {
+function RecommendationCard({ recipe, userPrefs, savePrefs, onLike, onDislike, onCooked }) {
   const isLiked = userPrefs.liked.some((r) => r.recipeId === recipe.id && r.source === recipe._source);
   const isDisliked = userPrefs.disliked.some((r) => r.recipeId === recipe.id && r.source === recipe._source);
 
@@ -1125,6 +1257,7 @@ function RecommendationCard({ recipe, userPrefs, onLike, onDislike, onCooked }) 
               {recipe._ingredients.join(', ')}
             </p>
           )}
+          <RecipeTags recipeId={recipe.id} userPrefs={userPrefs} savePrefs={savePrefs} />
         </div>
         <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0, alignItems: 'center' }}>
           <button onClick={() => onLike(recipe)} title="Like" style={actionBtn(isLiked, '#27ae60')}>
@@ -1292,6 +1425,7 @@ function RecommendationsTab({ allRecipes, userPrefs, savePrefs, loadingPrefs, us
             key={`${recipe._source}:${recipe.id}`}
             recipe={recipe}
             userPrefs={userPrefs}
+            savePrefs={savePrefs}
             onLike={handleLike}
             onDislike={handleDislike}
             onCooked={handleCooked}
@@ -1310,7 +1444,7 @@ export default function Cookbooks() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState('cookbooks');
   const [allRecipes, setAllRecipes] = useState(null);
-  const [userPrefs, setUserPrefs] = useState({ liked: [], disliked: [], cookedHistory: [], ownedBooks: [] });
+  const [userPrefs, setUserPrefs] = useState({ liked: [], disliked: [], cookedHistory: [], ownedBooks: [], recipeTags: {} });
   const [loadingPrefs, setLoadingPrefs] = useState(true);
   const bookId = searchParams.get('book');
 
