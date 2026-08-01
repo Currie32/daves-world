@@ -321,6 +321,7 @@ const TYPE_LABEL = {
   book: 'Book',
   author: 'Author',
   tag: 'Tag',
+  liked: 'Liked',
 };
 
 function makeCookbookEntry(recipe) {
@@ -459,13 +460,15 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
               return (authorToBookIds[filter.value] || new Set()).has(recipe.bookId);
             case 'tag':
               return (userPrefs?.recipeTags?.[recipe.id] || []).includes(filter.value);
+            case 'liked':
+              return (userPrefs?.liked || []).some((r) => r.recipeId === recipe.id && r.source === 'cookbook');
             default:
               return true;
           }
         })
       )
       .sort((a, b) => a.ingredients.length - b.ingredients.length);
-  }, [allRecipes, selectedFilters, authorToBookIds, userPrefs?.recipeTags]);
+  }, [allRecipes, selectedFilters, authorToBookIds, userPrefs?.recipeTags, userPrefs?.liked]);
 
   function addFilter(filter) {
     setSelectedFilters((prev) => {
@@ -500,10 +503,12 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   }, []);
 
   const hasFilters = selectedFilters.length > 0;
+  const isLikedActive = selectedFilters.some((f) => f.type === 'liked');
 
   return (
     <div>
-      <div ref={containerRef} style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}>
+        <div ref={containerRef} style={{ position: 'relative', flex: 1 }}>
         <SearchInput
           placeholder="Filter by ingredient, book, author, or tag…"
           value={query}
@@ -581,12 +586,33 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
             ))}
           </div>
         )}
+        </div>
+        <button
+          onClick={() => (isLikedActive
+            ? removeFilter({ type: 'liked', value: 'liked' })
+            : addFilter({ type: 'liked', value: 'liked' }))}
+          style={{
+            flexShrink: 0,
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            border: `1px solid ${isLikedActive ? '#27ae60' : 'var(--color-border)'}`,
+            background: isLikedActive ? '#27ae60' : 'var(--color-surface)',
+            color: isLikedActive ? '#fff' : 'var(--color-text-muted)',
+            fontFamily: 'var(--font-body)',
+            fontSize: '0.9rem',
+            fontWeight: isLikedActive ? 600 : 400,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          👍 only
+        </button>
       </div>
 
-      {/* Active filter chips */}
-      {hasFilters && (
+      {/* Active filter chips (liked-only has its own toggle button above) */}
+      {selectedFilters.some((f) => f.type !== 'liked') && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', margin: '0.75rem 0' }}>
-          {selectedFilters.map((f) => (
+          {selectedFilters.filter((f) => f.type !== 'liked').map((f) => (
             <button
               key={`${f.type}:${f.value}`}
               onClick={() => removeFilter(f)}
@@ -662,6 +688,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
 function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
   const { handleLike, handleDislike } = useCookbookLikeHandlers(userPrefs, savePrefs);
   const [query, setQuery] = useState('');
+  const [likedOnly, setLikedOnly] = useState(false);
 
   const book = bookId ? cookbooksIndex.find((b) => b.id === bookId) : null;
 
@@ -679,8 +706,11 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
   const results = useMemo(() => {
     let items = query ? search(fuse, query) : bookRecipes;
     if (!items) items = bookRecipes;
+    if (likedOnly) {
+      items = items.filter((r) => (userPrefs?.liked || []).some((p) => p.recipeId === r.id && p.source === 'cookbook'));
+    }
     return [...items].sort((a, b) => (a.page ?? Infinity) - (b.page ?? Infinity));
-  }, [query, fuse, bookRecipes]);
+  }, [query, fuse, bookRecipes, likedOnly, userPrefs?.liked]);
 
   if (allRecipes === null) {
     return <p style={{ color: 'var(--color-text-muted)' }}>Loading recipes…</p>;
@@ -707,11 +737,33 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
           </p>
         </div>
       )}
-      <SearchInput
-        placeholder="Search by title, ingredient, category, or tag…"
-        value={query}
-        onChange={setQuery}
-      />
+      <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}>
+        <div style={{ flex: 1 }}>
+          <SearchInput
+            placeholder="Search by title, ingredient, category, or tag…"
+            value={query}
+            onChange={setQuery}
+          />
+        </div>
+        <button
+          onClick={() => setLikedOnly((v) => !v)}
+          style={{
+            flexShrink: 0,
+            padding: '0.75rem 1rem',
+            borderRadius: '8px',
+            border: `1px solid ${likedOnly ? '#27ae60' : 'var(--color-border)'}`,
+            background: likedOnly ? '#27ae60' : 'var(--color-surface)',
+            color: likedOnly ? '#fff' : 'var(--color-text-muted)',
+            fontFamily: 'var(--font-body)',
+            fontSize: '0.9rem',
+            fontWeight: likedOnly ? 600 : 400,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          👍 only
+        </button>
+      </div>
       <p style={styles.resultsCount}>
         {results.length} recipe{results.length !== 1 ? 's' : ''}
         {book ? ` in ${book.title}` : ''}
