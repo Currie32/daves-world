@@ -29,6 +29,8 @@ firestore.rules      # Firestore security rules
 | `/weather-forecast` | WeatherForecast.jsx | Ensemble weather forecast with uncertainty viz |
 | `/movie-finder` | MovieFinder.jsx | Movie discovery by mood/taste with streaming availability |
 | `/trail-poster` | TrailPoster.jsx | Trail poster maker with MapLibre GL, contour lines, export |
+| `/book-finder` | BookFinder.jsx | Book recommendations from seed books via Google Books API |
+| `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
 
 ## Design System
 
@@ -45,6 +47,7 @@ firestore.rules      # Firestore security rules
 - `VITE_ADMIN_UID` — Firebase UID for admin-only features
 - `VITE_TMDB_API_KEY` — TMDB API key for movie discovery
 - `VITE_MAPTILER_API_KEY` — MapTiler API key for contour tiles (Trail Poster)
+- `VITE_GOOGLE_BOOKS_API_KEY` — Google Books API key for Book Finder
 
 ## External Services
 
@@ -56,6 +59,8 @@ firestore.rules      # Firestore security rules
 - **TMDB**: Movie database API (discover, recommendations, watch providers)
 - **MapLibre GL + OpenFreeMap**: Vector tile map rendering for Trail Poster (no API key needed)
 - **MapTiler**: Contour tile source for elevation lines in Trail Poster (free tier, requires API key)
+- **Google Books API**: Search and volume lookups for Book Finder
+- **multpl.com**: Scraped server-side (BeautifulSoup, Cloud Function `fetch_pe_data`) for S&P 500 P/E and CAPE data
 
 ## Commands
 

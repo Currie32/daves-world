@@ -46,5 +46,21 @@
     "emoji": "🥾",
     "route": "/trail-poster",
     "comingSoon": false
+  },
+  {
+    "id": "book-finder",
+    "title": "Book Finder",
+    "description": "Discover books based on mood and taste.",
+    "emoji": "📖",
+    "route": "/book-finder",
+    "comingSoon": false
+  },
+  {
+    "id": "sp500-pe",
+    "title": "S&P 500 P/E Ratio",
+    "description": "Historical price-to-earnings ratio since 1871.",
+    "emoji": "📈",
+    "route": "/sp500-pe",
+    "comingSoon": false
   }
 ]
