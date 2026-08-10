@@ -112,7 +112,7 @@ function pillsFrom(items, limit = 3) {
 
 // ─── CookbookCard ─────────────────────────────────────────────────────────────
 
-function CookbookCard({ book, onClick, owned, onToggleOwned }) {
+function CookbookCard({ book, onClick, owned, onToggleOwned, likedCount }) {
   const { hovered, ...hoverProps } = useHover();
   return (
     <div
@@ -130,22 +130,29 @@ function CookbookCard({ book, onClick, owned, onToggleOwned }) {
       <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
         {book.author} · {book.recipeCount} recipes
       </p>
-      <button
-        onClick={(e) => { e.stopPropagation(); onToggleOwned(book.id); }}
-        style={{
-          padding: '0.2rem 0.6rem',
-          background: owned ? 'var(--color-accent)' : 'transparent',
-          border: `1px solid ${owned ? 'var(--color-accent)' : 'var(--color-border)'}`,
-          borderRadius: '999px',
-          fontFamily: 'var(--font-body)',
-          fontSize: '0.75rem',
-          fontWeight: owned ? 600 : 400,
-          color: owned ? '#fff' : 'var(--color-text-muted)',
-          cursor: 'pointer',
-        }}
-      >
-        {owned ? '✓ Owned' : '+ Own'}
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleOwned(book.id); }}
+          style={{
+            padding: '0.2rem 0.6rem',
+            background: owned ? 'var(--color-accent)' : 'transparent',
+            border: `1px solid ${owned ? 'var(--color-accent)' : 'var(--color-border)'}`,
+            borderRadius: '999px',
+            fontFamily: 'var(--font-body)',
+            fontSize: '0.75rem',
+            fontWeight: owned ? 600 : 400,
+            color: owned ? '#fff' : 'var(--color-text-muted)',
+            cursor: 'pointer',
+          }}
+        >
+          {owned ? '✓ Owned' : '+ Own'}
+        </button>
+        {likedCount > 0 && (
+          <span style={{ fontSize: '0.85rem', color: 'var(--color-text)' }}>
+            👍 {likedCount} liked
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -389,6 +396,18 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
     };
   }, [allRecipes]);
 
+  const likedCountByBook = useMemo(() => {
+    if (!allRecipes) return {};
+    const likedIds = new Set(
+      (userPrefs?.liked || []).filter((p) => p.source === 'cookbook').map((p) => p.recipeId)
+    );
+    const counts = {};
+    allRecipes.forEach((r) => {
+      if (likedIds.has(r.id)) counts[r.bookId] = (counts[r.bookId] || 0) + 1;
+    });
+    return counts;
+  }, [allRecipes, userPrefs?.liked]);
+
   const bookOptions = useMemo(
     () => [...cookbooksIndex].sort((a, b) => b.recipeCount - a.recipeCount).map((b) => b.title),
     []
@@ -427,19 +446,36 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   const suggestions = useMemo(() => {
     if (!query) return [];
     const q = query.toLowerCase();
-    const results = [];
     const alreadySelected = new Set(selectedFilters.map((f) => `${f.type}:${f.value}`));
-    function add(type, list, limit) {
-      list
-        .filter((v) => v.toLowerCase().includes(q) && !alreadySelected.has(`${type}:${v}`))
-        .slice(0, limit)
-        .forEach((v) => results.push({ type, value: v }));
+
+    // Lower tier number = better match. Exact match, then prefix match, then
+    // match at a word boundary (e.g. "chicken" in "whole chicken"), then any substring.
+    function matchTier(value) {
+      const v = value.toLowerCase();
+      const idx = v.indexOf(q);
+      if (idx === -1) return -1;
+      if (v === q) return 0;
+      if (idx === 0) return 1;
+      if (/[\s-]/.test(v[idx - 1])) return 2;
+      return 3;
     }
-    add('ingredient', ingredientOptions, Infinity);
-    add('book', bookOptions, Infinity);
-    add('author', authorOptions, Infinity);
-    add('tag', tagOptions, Infinity);
-    return results;
+
+    const results = [];
+    function add(type, list) {
+      list.forEach((v, i) => {
+        if (alreadySelected.has(`${type}:${v}`)) return;
+        const tier = matchTier(v);
+        if (tier === -1) return;
+        results.push({ type, value: v, tier, freqIndex: i });
+      });
+    }
+    add('ingredient', ingredientOptions);
+    add('book', bookOptions);
+    add('author', authorOptions);
+    add('tag', tagOptions);
+
+    results.sort((a, b) => a.tier - b.tier || a.freqIndex - b.freqIndex);
+    return results.map(({ type, value }) => ({ type, value }));
   }, [query, ingredientOptions, categoryOptions, bookOptions, authorOptions, tagOptions, selectedFilters]);
 
   // Recipe results: AND logic across all selected filters
@@ -649,6 +685,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
                 book={book}
                 onClick={() => onSelectBook(book.id)}
                 owned={(userPrefs?.ownedBooks || []).includes(book.id)}
+                likedCount={likedCountByBook[book.id] || 0}
                 onToggleOwned={(id) => {
                   const owned = userPrefs?.ownedBooks || [];
                   savePrefs({
@@ -737,18 +774,16 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
           </p>
         </div>
       )}
-      <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}>
-        <div style={{ flex: 1 }}>
-          <SearchInput
-            placeholder="Search by title, ingredient, category, or tag…"
-            value={query}
-            onChange={setQuery}
-          />
-        </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+        <SearchInput
+          placeholder="Search by title, ingredient, category, or tag…"
+          value={query}
+          onChange={setQuery}
+        />
         <button
           onClick={() => setLikedOnly((v) => !v)}
           style={{
-            flexShrink: 0,
+            alignSelf: 'flex-start',
             padding: '0.75rem 1rem',
             borderRadius: '8px',
             border: `1px solid ${likedOnly ? '#27ae60' : 'var(--color-border)'}`,
@@ -873,9 +908,14 @@ function WebRecipeCard({ recipe, onDelete }) {
           </div>
 
           {/* Ingredients + Instructions */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', padding: '1.5rem' }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: '2rem',
+            padding: '1.5rem',
+          }}>
             {recipe.ingredients?.length > 0 && (
-              <div style={{ flex: '0 0 280px', paddingRight: '2rem', borderRight: '1px solid var(--color-border)' }}>
+              <div>
                 <div style={sectionLabel}>Ingredients</div>
                 <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
                   {recipe.ingredients.map((ing, i) => (
@@ -893,7 +933,7 @@ function WebRecipeCard({ recipe, onDelete }) {
               </div>
             )}
             {recipe.instructions?.length > 0 && (
-              <div style={{ flex: 1, paddingLeft: recipe.ingredients?.length > 0 ? '2rem' : 0 }}>
+              <div>
                 <div style={sectionLabel}>Instructions</div>
                 <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                   {recipe.instructions.map((step, i) => (
@@ -1289,8 +1329,8 @@ function RecommendationCard({ recipe, userPrefs, savePrefs, onLike, onDislike, o
       padding: '1rem 1.25rem',
       opacity: recipe._recentlyCooked ? 0.6 : 1,
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
           <h3 style={{ margin: '0 0 0.15rem', fontSize: '0.95rem', fontFamily: 'var(--font-display)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {recipe.title}
           </h3>
@@ -1311,7 +1351,7 @@ function RecommendationCard({ recipe, userPrefs, savePrefs, onLike, onDislike, o
           )}
           <RecipeTags recipeId={recipe.id} userPrefs={userPrefs} savePrefs={savePrefs} />
         </div>
-        <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0, alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
           <button onClick={() => onLike(recipe)} title="Like" style={actionBtn(isLiked, '#27ae60')}>
             👍 Like
           </button>
