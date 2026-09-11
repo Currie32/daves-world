@@ -31,6 +31,7 @@ firestore.rules      # Firestore security rules
 | `/trail-poster` | TrailPoster.jsx | Trail poster maker with MapLibre GL, contour lines, export |
 | `/book-finder` | BookFinder.jsx | Book recommendations from seed books via Google Books API |
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
+| `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
 
 ## Design System
 

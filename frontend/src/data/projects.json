@@ -62,5 +62,13 @@
     "emoji": "📈",
     "route": "/sp500-pe",
     "comingSoon": false
+  },
+  {
+    "id": "mortgage-calculator",
+    "title": "Mortgage Payoff Calculator",
+    "description": "See how extra payments and rate changes affect your payoff timeline.",
+    "emoji": "🏠",
+    "route": "/mortgage-calculator",
+    "comingSoon": false
   }
 ]
