@@ -64,6 +64,14 @@
     "comingSoon": false
   },
   {
+    "id": "events",
+    "title": "Events",
+    "description": "Seasonal things to do around Metro Vancouver & the Tri-Cities.",
+    "emoji": "📅",
+    "route": "/events",
+    "comingSoon": false
+  },
+  {
     "id": "mortgage-calculator",
     "title": "Mortgage Payoff Calculator",
     "description": "See how extra payments and rate changes affect your payoff timeline.",

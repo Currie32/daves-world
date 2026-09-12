@@ -31,6 +31,7 @@ firestore.rules      # Firestore security rules
 | `/trail-poster` | TrailPoster.jsx | Trail poster maker with MapLibre GL, contour lines, export |
 | `/book-finder` | BookFinder.jsx | Book recommendations from seed books via Google Books API |
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
+| `/events` | Events.jsx | Metro Vancouver events browser: search, map, calendar |
 | `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
 
 ## Design System
@@ -62,6 +63,8 @@ firestore.rules      # Firestore security rules
 - **MapTiler**: Contour tile source for elevation lines in Trail Poster (free tier, requires API key)
 - **Google Books API**: Search and volume lookups for Book Finder
 - **multpl.com**: Scraped server-side (BeautifulSoup, Cloud Function `fetch_pe_data`) for S&P 500 P/E and CAPE data
+- **Metro Vancouver municipal/tourism event sources**: Scraped server-side (`.ics` feeds, "The Events Calendar" REST API, JSON-LD) for Events — Coquitlam, Port Moody, Port Coquitlam, Tourism Coquitlam, Destination Vancouver, Metro Vancouver Regional Parks, Tourism Burnaby, New Westminster
+- **Google Geocoding API**: Server-side geocoding of event addresses without lat/lng (Events)
 
 ## Commands
 

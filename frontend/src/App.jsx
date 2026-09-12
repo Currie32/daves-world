@@ -8,6 +8,7 @@ import MovieFinder from './pages/MovieFinder';
 import TrailPoster from './pages/TrailPoster';
 import BookFinder from './pages/BookFinder';
 import SP500PE from './pages/SP500PE';
+import Events from './pages/Events';
 import MortgageCalculator from './pages/MortgageCalculator';
 import Layout from './components/Layout';
 
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/trail-poster" element={<TrailPoster />} />
           <Route path="/book-finder" element={<BookFinder />} />
           <Route path="/sp500-pe" element={<SP500PE />} />
+          <Route path="/events" element={<Events />} />
           <Route path="/mortgage-calculator" element={<MortgageCalculator />} />
         </Routes>
       </Layout>
