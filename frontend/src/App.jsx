@@ -11,10 +11,12 @@ import SP500PE from './pages/SP500PE';
 import Events from './pages/Events';
 import MortgageCalculator from './pages/MortgageCalculator';
 import Layout from './components/Layout';
+import UpdatePrompt from './components/UpdatePrompt';
 
 export default function App() {
   return (
     <BrowserRouter>
+      <UpdatePrompt />
       <Layout>
         <Routes>
           <Route path="/" element={<Home />} />

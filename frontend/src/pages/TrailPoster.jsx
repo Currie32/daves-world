@@ -1061,7 +1061,12 @@ export default function TrailPoster() {
   };
 
   return (
-    <div style={{ padding: '0.75rem 1.5rem', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 52px)' }}>
+    <div style={{
+      padding: '0.75rem 1.5rem',
+      display: 'flex',
+      flexDirection: 'column',
+      height: 'calc(100dvh - 52px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+    }}>
       <PageHeader
         title="Trail Poster Maker"
         subtitle="Create printable art from your favorite trails"

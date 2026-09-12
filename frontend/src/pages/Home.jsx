@@ -19,7 +19,7 @@ export default function Home() {
           margin: 0,
           fontFamily: 'var(--font-body)',
         }}>
-          Dave's World, Dave's World. Vibe coding time, excellent.
+          A personal collection of tools and experiments.
         </p>
         <div style={{
           marginTop: '1.5rem',

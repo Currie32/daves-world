@@ -1,5 +1,11 @@
+import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { signInWithPopup, signOut, GoogleAuthProvider } from 'firebase/auth';
+import {
+  signInWithRedirect,
+  getRedirectResult,
+  signOut,
+  GoogleAuthProvider,
+} from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
 
@@ -8,8 +14,15 @@ export default function Layout({ children }) {
   const location = useLocation();
   const isHome = location.pathname === '/';
 
+  // signInWithPopup is unreliable when the site is installed as an Android
+  // PWA (the popup can open detached from the standalone window and never
+  // return a result), so sign-in uses a full redirect instead.
+  useEffect(() => {
+    getRedirectResult(auth).catch(() => {});
+  }, []);
+
   function handleSignIn() {
-    signInWithPopup(auth, new GoogleAuthProvider()).catch(() => {});
+    signInWithRedirect(auth, new GoogleAuthProvider()).catch(() => {});
   }
 
   function handleSignOut() {
@@ -17,7 +30,15 @@ export default function Layout({ children }) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: '100dvh',
+      paddingTop: 'env(safe-area-inset-top)',
+      paddingBottom: 'env(safe-area-inset-bottom)',
+      paddingLeft: 'env(safe-area-inset-left)',
+      paddingRight: 'env(safe-area-inset-right)',
+    }}>
       {!isHome && (
         <nav style={{
           padding: '0.75rem 1.5rem',
