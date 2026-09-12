@@ -13,21 +13,6 @@ export default function Home() {
         }}>
           Dave's World
         </h1>
-        <p style={{
-          fontSize: '1.2rem',
-          color: 'var(--color-text-muted)',
-          margin: 0,
-          fontFamily: 'var(--font-body)',
-        }}>
-          A personal collection of tools and experiments.
-        </p>
-        <div style={{
-          marginTop: '1.5rem',
-          width: '3rem',
-          height: '3px',
-          background: 'var(--color-accent)',
-          borderRadius: '2px',
-        }} />
       </header>
 
       <main>
