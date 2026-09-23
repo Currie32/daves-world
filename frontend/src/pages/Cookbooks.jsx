@@ -21,6 +21,7 @@ const styles = {
   },
   tabs: {
     display: 'flex',
+    flexWrap: 'wrap',
     gap: '0.25rem',
     marginBottom: '2rem',
     borderBottom: '2px solid var(--color-border)',
@@ -322,12 +323,74 @@ function RecipeCard({ recipe, userPrefs, savePrefs, onLike, onDislike }) {
 
 // ─── CookbookIndex ────────────────────────────────────────────────────────────
 
+const AUTHOR_BY_BOOK_ID = Object.fromEntries(cookbooksIndex.map((b) => [b.id, b.author]));
+
+// Four-tier match ranking shared by the filter dropdown and the recipe searches:
+// exact, prefix, word-boundary (so "lemon" hits "preserved lemon"), any substring.
+function matchTier(value, q) {
+  const v = (value || '').toLowerCase();
+  const idx = v.indexOf(q);
+  if (idx === -1) return -1;
+  if (v === q) return 0;
+  if (idx === 0) return 1;
+  if (/[\s-]/.test(v[idx - 1])) return 2;
+  return 3;
+}
+
+// Rank recipes by their single best field match, so a title hit always beats an
+// ingredient hit. `fieldsFor` returns [value, weight] pairs; lower weight wins.
+function searchRecipes(recipes, query, fieldsFor) {
+  const q = query.trim().toLowerCase();
+  if (!q) return recipes;
+
+  const scored = [];
+  recipes.forEach((r) => {
+    let best = null;
+    fieldsFor(r).forEach(([value, weight]) => {
+      const t = matchTier(value, q);
+      if (t === -1) return;
+      const score = weight * 10 + t;
+      if (best === null || score < best) best = score;
+    });
+    if (best !== null) scored.push({ recipe: r, score: best });
+  });
+
+  scored.sort(
+    (a, b) => a.score - b.score
+      || (a.recipe.ingredients?.length || 0) - (b.recipe.ingredients?.length || 0)
+  );
+  return scored.map((x) => x.recipe);
+}
+
+// Field weights for a cookbook recipe: title, tags, categories, ingredients, book/author.
+function cookbookFields(r, userPrefs) {
+  return [
+    [r.title, 0],
+    ...(userPrefs?.recipeTags?.[r.id] || []).map((t) => [t, 1]),
+    ...(r.categories || []).map((c) => [c, 2]),
+    ...(r.ingredientsStandardised || r.ingredients || []).map((i) => [i, 3]),
+    [r.book, 4],
+    [AUTHOR_BY_BOOK_ID[r.bookId], 4],
+  ];
+}
+
+// Web recipes have no categories or author — the site stands in for the book.
+function webFields(r, userPrefs) {
+  return [
+    [r.title, 0],
+    ...(userPrefs?.recipeTags?.[r.id] || []).map((t) => [t, 1]),
+    ...(r.ingredients || []).map((i) => [i, 3]),
+    [r.source || r.host, 4],
+  ];
+}
+
 const TYPE_LABEL = {
   ingredient: 'Ingredient',
   category: 'Category',
   book: 'Book',
   author: 'Author',
   tag: 'Tag',
+  recipe: 'Recipe',
   liked: 'Liked',
 };
 
@@ -378,21 +441,24 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   const dropdownRef = useRef(null);
 
   // Build facet lists sorted by frequency in recipes
-  const { ingredientOptions, categoryOptions } = useMemo(() => {
-    if (!allRecipes) return { ingredientOptions: [], categoryOptions: [] };
+  const { ingredientOptions, categoryOptions, recipeOptions } = useMemo(() => {
+    if (!allRecipes) return { ingredientOptions: [], categoryOptions: [], recipeOptions: [] };
     const ingCount = new Map();
     const catSet = new Set();
+    const titleSet = new Set();
     allRecipes.forEach((r) => {
       (r.ingredientsStandardised || r.ingredients || []).forEach((i) => {
         ingCount.set(i, (ingCount.get(i) || 0) + 1);
       });
       (r.categories || []).forEach((c) => catSet.add(c));
+      if (r.title) titleSet.add(r.title);
     });
     return {
       ingredientOptions: [...ingCount.entries()]
         .sort((a, b) => b[1] - a[1])
         .map(([v]) => v),
       categoryOptions: [...catSet].sort(),
+      recipeOptions: [...titleSet].sort((a, b) => a.localeCompare(b)),
     };
   }, [allRecipes]);
 
@@ -435,12 +501,17 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   }, []);
 
   const tagOptions = useMemo(() => {
+    // Tags live in one shared vocabulary across cookbook and web recipes, but
+    // this filter only searches cookbook recipes — so only offer tags that are
+    // actually on one, otherwise a web-only tag would match nothing here.
+    const cookbookIds = new Set((allRecipes || []).map((r) => r.id));
     const count = new Map();
-    Object.values(userPrefs?.recipeTags || {}).forEach((tags) =>
-      tags.forEach((t) => count.set(t, (count.get(t) || 0) + 1))
-    );
+    Object.entries(userPrefs?.recipeTags || {}).forEach(([id, tags]) => {
+      if (!cookbookIds.has(id)) return;
+      tags.forEach((t) => count.set(t, (count.get(t) || 0) + 1));
+    });
     return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([v]) => v);
-  }, [userPrefs?.recipeTags]);
+  }, [userPrefs?.recipeTags, allRecipes]);
 
   // Autocomplete suggestions: ingredients, categories, books, authors, tags matching query
   const suggestions = useMemo(() => {
@@ -448,27 +519,24 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
     const q = query.toLowerCase();
     const alreadySelected = new Set(selectedFilters.map((f) => `${f.type}:${f.value}`));
 
-    // Lower tier number = better match. Exact match, then prefix match, then
-    // match at a word boundary (e.g. "chicken" in "whole chicken"), then any substring.
-    function matchTier(value) {
-      const v = value.toLowerCase();
-      const idx = v.indexOf(q);
-      if (idx === -1) return -1;
-      if (v === q) return 0;
-      if (idx === 0) return 1;
-      if (/[\s-]/.test(v[idx - 1])) return 2;
-      return 3;
-    }
-
     const results = [];
-    function add(type, list) {
+    function add(type, list, limit) {
+      const picked = [];
       list.forEach((v, i) => {
         if (alreadySelected.has(`${type}:${v}`)) return;
-        const tier = matchTier(v);
+        const tier = matchTier(v, q);
         if (tier === -1) return;
-        results.push({ type, value: v, tier, freqIndex: i });
+        picked.push({ type, value: v, tier, freqIndex: i });
       });
+      if (limit != null && picked.length > limit) {
+        picked.sort((a, b) => a.tier - b.tier || a.freqIndex - b.freqIndex);
+        picked.length = limit;
+      }
+      results.push(...picked);
     }
+    // Recipe titles first: on an exact-title query they should outrank an
+    // ingredient of the same name. Capped — there are thousands of them.
+    add('recipe', recipeOptions, 8);
     add('ingredient', ingredientOptions);
     add('book', bookOptions);
     add('author', authorOptions);
@@ -476,7 +544,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
 
     results.sort((a, b) => a.tier - b.tier || a.freqIndex - b.freqIndex);
     return results.map(({ type, value }) => ({ type, value }));
-  }, [query, ingredientOptions, categoryOptions, bookOptions, authorOptions, tagOptions, selectedFilters]);
+  }, [query, ingredientOptions, categoryOptions, recipeOptions, bookOptions, authorOptions, tagOptions, selectedFilters]);
 
   // Recipe results: AND logic across all selected filters
   const recipeResults = useMemo(() => {
@@ -494,6 +562,8 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
               return recipe.book === filter.value;
             case 'author':
               return (authorToBookIds[filter.value] || new Set()).has(recipe.bookId);
+            case 'recipe':
+              return (recipe.title || '').toLowerCase() === filter.value.toLowerCase();
             case 'tag':
               return (userPrefs?.recipeTags?.[recipe.id] || []).includes(filter.value);
             case 'liked':
@@ -505,6 +575,13 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
       )
       .sort((a, b) => a.ingredients.length - b.ingredients.length);
   }, [allRecipes, selectedFilters, authorToBookIds, userPrefs?.recipeTags, userPrefs?.liked]);
+
+  // Free-text results as you type; ANDs with any chips already selected.
+  const searchResults = useMemo(() => {
+    if (!allRecipes || !query.trim()) return null;
+    const base = selectedFilters.length > 0 ? recipeResults : allRecipes;
+    return searchRecipes(base, query, (r) => cookbookFields(r, userPrefs));
+  }, [query, allRecipes, recipeResults, selectedFilters, userPrefs]);
 
   function addFilter(filter) {
     setSelectedFilters((prev) => {
@@ -539,14 +616,18 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   }, []);
 
   const hasFilters = selectedFilters.length > 0;
+  const hasQuery = query.trim().length > 0;
   const isLikedActive = selectedFilters.some((f) => f.type === 'liked');
+
+  const activeResults = hasQuery ? (searchResults || []) : recipeResults;
+  const showingResults = hasFilters || hasQuery;
 
   return (
     <div>
       <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}>
         <div ref={containerRef} style={{ position: 'relative', flex: 1 }}>
         <SearchInput
-          placeholder="Filter by ingredient, book, author, or tag…"
+          placeholder="Filter by recipe, ingredient, book, author, or tag…"
           value={query}
           onChange={(v) => { setQuery(v); setShowDropdown(true); setHighlightedIndex(0); }}
           onKeyDown={(e) => {
@@ -674,8 +755,8 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
         </div>
       )}
 
-      {/* Cookbook grid when no filters active */}
-      {!hasFilters && (
+      {/* Cookbook grid when nothing is being searched or filtered */}
+      {!showingResults && (
         <>
           <p style={styles.resultsCount}>{cookbooksIndex.length} cookbook{cookbooksIndex.length !== 1 ? 's' : ''}</p>
           <div style={styles.grid}>
@@ -699,21 +780,30 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
         </>
       )}
 
-      {/* Recipe results when filters active */}
-      {hasFilters && (
+      {/* Recipe results while typing and/or filtering */}
+      {showingResults && (
         <>
-          <p style={styles.resultsCount}>{recipeResults.length} recipe{recipeResults.length !== 1 ? 's' : ''}</p>
+          <p style={styles.resultsCount}>
+            {activeResults.length} recipe{activeResults.length !== 1 ? 's' : ''}
+            {hasQuery ? ` matching “${query.trim()}”` : ''}
+          </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
-            {recipeResults.slice(0, 200).map((r, idx) => (
+            {activeResults.slice(0, 200).map((r, idx) => (
               <RecipeCard key={`${r.id}-${idx}`} recipe={r} userPrefs={userPrefs} savePrefs={savePrefs} onLike={handleLike} onDislike={handleDislike} />
             ))}
-            {recipeResults.length > 200 && (
+            {activeResults.length > 200 && (
               <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
-                Showing 200 of {recipeResults.length} results. Refine your search to see more.
+                Showing 200 of {activeResults.length} results. Refine your search to see more.
               </p>
             )}
           </div>
-          {recipeResults.length === 0 && <EmptyState message="No recipes match all selected filters." />}
+          {activeResults.length === 0 && (
+            <EmptyState
+              message={hasQuery
+                ? `No recipes match “${query.trim()}”.`
+                : 'No recipes match all selected filters.'}
+            />
+          )}
         </>
       )}
     </div>
@@ -820,14 +910,16 @@ function RecipeBrowser({ bookId, onBack, allRecipes, userPrefs, savePrefs }) {
 
 // ─── WebRecipeCard ────────────────────────────────────────────────────────────
 
-function WebRecipeCard({ recipe, onDelete }) {
+function WebRecipeCard({ recipe, onDelete, userPrefs, savePrefs }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const times = [
-    recipe.prepTime ? { label: 'Prep', value: recipe.prepTime } : null,
-    recipe.cookTime ? { label: 'Cook', value: recipe.cookTime } : null,
-    recipe.totalTime ? { label: 'Total', value: recipe.totalTime } : null,
+  const sourceName = recipe.source || recipe.host;
+
+  // Mirrors the cookbook card's "Book · Author · p. 12" line.
+  const metaParts = [
+    recipe.totalTime ? `${recipe.totalTime} min` : null,
+    recipe.servings || null,
   ].filter(Boolean);
 
   const sectionLabel = {
@@ -836,83 +928,69 @@ function WebRecipeCard({ recipe, onDelete }) {
     letterSpacing: '0.08em',
     textTransform: 'uppercase',
     color: 'var(--color-accent)',
-    marginBottom: '0.75rem',
+    marginBottom: '0.6rem',
   };
+
+  const stop = (e) => e.stopPropagation();
 
   return (
     <div
-      style={{
-        background: 'var(--color-surface)',
-        border: '1px solid var(--color-border)',
-        borderRadius: '12px',
-        overflow: 'hidden',
-        cursor: 'pointer',
-      }}
+      // Saved from the web means you chose to keep it — treat it as liked.
+      style={{ ...styles.recipeCard, padding: 0, cursor: 'pointer', borderLeft: '4px solid #27ae60' }}
       onClick={() => setExpanded((e) => !e)}
     >
-      {/* Hero image */}
-      {expanded && recipe.image && (
-        <img
-          src={recipe.image}
-          alt={recipe.title}
-          style={{ width: '100%', height: '240px', objectFit: 'cover', display: 'block' }}
-        />
-      )}
-
-      {/* Title row */}
-      <div style={{ padding: '1.25rem 1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ margin: 0, fontSize: '1.1rem', fontFamily: 'var(--font-display)', fontWeight: 600 }}>
-          {recipe.title || recipe.source || recipe.host || recipe.url || 'Untitled Recipe'}
-        </h3>
-        <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', flexShrink: 0, marginLeft: '1rem' }}>
-          {expanded ? '▲' : '▼'}
-        </span>
+      {/* Header — same shape as RecipeCard: title, source line, ingredient preview, tags */}
+      <div style={{ padding: expanded ? '1rem 1.25rem 0.75rem' : '1rem 1.25rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ margin: '0 0 0.2rem', fontSize: '0.95rem', fontFamily: 'var(--font-display)' }}>
+              {recipe.title || sourceName || recipe.url || 'Untitled Recipe'}
+            </h3>
+            <p style={{ margin: '0 0 0.4rem', fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+              {sourceName && recipe.url ? (
+                <a
+                  href={recipe.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={stop}
+                  style={{ color: 'var(--color-accent)', textDecoration: 'none' }}
+                  onMouseEnter={(e) => (e.target.style.textDecoration = 'underline')}
+                  onMouseLeave={(e) => (e.target.style.textDecoration = 'none')}
+                >
+                  {sourceName} ↗
+                </a>
+              ) : (
+                sourceName || 'Web'
+              )}
+              {metaParts.map((m) => ` · ${m}`)}
+            </p>
+          </div>
+          <span style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', flexShrink: 0 }}>
+            {expanded ? '▲' : '▼'}
+          </span>
+        </div>
+        <div onClick={stop}>
+          <RecipeTags recipeId={recipe.id} userPrefs={userPrefs} savePrefs={savePrefs} />
+        </div>
       </div>
 
       {expanded && (
-        <div onClick={(e) => e.stopPropagation()}>
-          {/* Meta strip */}
-          <div style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '1.5rem',
-            padding: '1rem 1.5rem',
-            borderTop: '1px solid var(--color-border)',
-            borderBottom: '1px solid var(--color-border)',
-            background: 'var(--color-bg)',
-          }}>
-            {(recipe.source || recipe.host) && recipe.url && (
-              <a
-                href={recipe.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: '0.82rem', color: 'var(--color-accent)', fontWeight: 500, textDecoration: 'none' }}
-                onMouseEnter={e => e.target.style.textDecoration = 'underline'}
-                onMouseLeave={e => e.target.style.textDecoration = 'none'}
-              >
-                {recipe.source || recipe.host} ↗
-              </a>
-            )}
-            {times.map(({ label, value }) => (
-              <div key={label}>
-                <div style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--color-text-muted)', marginBottom: '0.1rem' }}>{label}</div>
-                <div style={{ fontSize: '0.85rem', fontWeight: 500 }}>{value} min</div>
-              </div>
-            ))}
-            {recipe.servings && (
-              <div>
-                <div style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--color-text-muted)', marginBottom: '0.1rem' }}>Serves</div>
-                <div style={{ fontSize: '0.85rem', fontWeight: 500 }}>{recipe.servings}</div>
-              </div>
-            )}
-          </div>
+        <div onClick={stop} style={{ padding: '0 1.25rem 1rem' }}>
+          {recipe.image && (
+            <img
+              src={recipe.image}
+              alt={recipe.title}
+              style={{
+                width: '100%', maxHeight: '220px', objectFit: 'cover',
+                borderRadius: '6px', display: 'block', marginBottom: '1.1rem',
+              }}
+            />
+          )}
 
-          {/* Ingredients + Instructions */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-            gap: '2rem',
-            padding: '1.5rem',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+            gap: '1.5rem',
           }}>
             {recipe.ingredients?.length > 0 && (
               <div>
@@ -920,11 +998,10 @@ function WebRecipeCard({ recipe, onDelete }) {
                 <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
                   {recipe.ingredients.map((ing, i) => (
                     <li key={i} style={{
-                      fontSize: '0.85rem',
+                      fontSize: '0.82rem',
                       lineHeight: 1.5,
-                      padding: '0.4rem 0',
+                      padding: '0.35rem 0',
                       borderBottom: '1px solid var(--color-border)',
-                      color: 'var(--color-text)',
                     }}>
                       {ing}
                     </li>
@@ -935,17 +1012,17 @@ function WebRecipeCard({ recipe, onDelete }) {
             {recipe.instructions?.length > 0 && (
               <div>
                 <div style={sectionLabel}>Instructions</div>
-                <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   {recipe.instructions.map((step, i) => (
-                    <li key={i} style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
+                    <li key={i} style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
                       <span style={{
                         flexShrink: 0,
-                        width: '1.6rem',
-                        height: '1.6rem',
+                        width: '1.4rem',
+                        height: '1.4rem',
                         borderRadius: '50%',
                         background: 'var(--color-accent)',
                         color: '#fff',
-                        fontSize: '0.72rem',
+                        fontSize: '0.68rem',
                         fontWeight: 700,
                         display: 'flex',
                         alignItems: 'center',
@@ -954,7 +1031,7 @@ function WebRecipeCard({ recipe, onDelete }) {
                       }}>
                         {i + 1}
                       </span>
-                      <span style={{ fontSize: '0.88rem', lineHeight: 1.7, color: 'var(--color-text)' }}>{step}</span>
+                      <span style={{ fontSize: '0.84rem', lineHeight: 1.6 }}>{step}</span>
                     </li>
                   ))}
                 </ol>
@@ -962,28 +1039,33 @@ function WebRecipeCard({ recipe, onDelete }) {
             )}
           </div>
 
-          {/* Delete */}
-          <div style={{ padding: '1rem 1.5rem', borderTop: '1px solid var(--color-border)', display: 'flex', justifyContent: 'flex-end' }}>
+          <div style={{
+            marginTop: '1rem',
+            paddingTop: '0.75rem',
+            borderTop: '1px solid var(--color-border)',
+            display: 'flex',
+            justifyContent: 'flex-end',
+          }}>
             {confirmDelete ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Delete this recipe?</span>
+                <span style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>Delete this recipe?</span>
                 <button
-                  onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }}
-                  style={{ padding: '0.35rem 0.85rem', background: 'transparent', border: '1px solid var(--color-border)', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.82rem', cursor: 'pointer', color: 'var(--color-text-muted)' }}
+                  onClick={() => setConfirmDelete(false)}
+                  style={{ padding: '0.3rem 0.8rem', background: 'transparent', border: '1px solid var(--color-border)', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', cursor: 'pointer', color: 'var(--color-text-muted)' }}
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={(e) => { e.stopPropagation(); onDelete(recipe.id); }}
-                  style={{ padding: '0.35rem 0.85rem', background: '#c0392b', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.82rem', cursor: 'pointer', color: '#fff', fontWeight: 500 }}
+                  onClick={() => onDelete(recipe.id)}
+                  style={{ padding: '0.3rem 0.8rem', background: '#c0392b', border: 'none', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', cursor: 'pointer', color: '#fff', fontWeight: 500 }}
                 >
                   Delete
                 </button>
               </div>
             ) : (
               <button
-                onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-                style={{ padding: '0.35rem 0.85rem', background: 'transparent', border: '1px solid var(--color-border)', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.82rem', cursor: 'pointer', color: 'var(--color-text-muted)' }}
+                onClick={() => setConfirmDelete(true)}
+                style={{ padding: '0.3rem 0.8rem', background: 'transparent', border: '1px solid var(--color-border)', borderRadius: '6px', fontFamily: 'var(--font-body)', fontSize: '0.8rem', cursor: 'pointer', color: 'var(--color-text-muted)' }}
               >
                 Delete
               </button>
@@ -997,7 +1079,7 @@ function WebRecipeCard({ recipe, onDelete }) {
 
 // ─── WebRecipes ───────────────────────────────────────────────────────────────
 
-function WebRecipes() {
+function WebRecipes({ userPrefs, savePrefs }) {
   const [recipes, setRecipes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -1019,23 +1101,30 @@ function WebRecipes() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Tags come from userPrefs.recipeTags — the same store cookbook recipes use —
+  // keyed by Firestore doc id. The legacy per-doc `tags` field is the fallback.
+  const tagged = useMemo(
+    () => recipes.map((r) => ({ ...r, tags: userPrefs?.recipeTags?.[r.id] || r.tags || [] })),
+    [recipes, userPrefs?.recipeTags]
+  );
+
   const allTags = useMemo(() => {
     const set = new Set();
-    recipes.forEach((r) => (r.tags || []).forEach((t) => set.add(t)));
+    tagged.forEach((r) => r.tags.forEach((t) => set.add(t)));
     return [...set].sort();
-  }, [recipes]);
+  }, [tagged]);
 
   const fuse = useMemo(
-    () => createSearch(recipes, ['title', 'source', 'tags']),
-    [recipes]
+    () => createSearch(tagged, ['title', 'source', 'tags']),
+    [tagged]
   );
 
   const results = useMemo(() => {
-    let items = query ? search(fuse, query) : recipes;
-    if (!items) items = recipes;
+    let items = query ? search(fuse, query) : tagged;
+    if (!items) items = tagged;
     if (activeTag) items = items.filter((r) => (r.tags || []).includes(activeTag));
     return items;
-  }, [query, activeTag, fuse, recipes]);
+  }, [query, activeTag, fuse, tagged]);
 
   async function handleImport() {
     if (!url.trim()) return;
@@ -1199,9 +1288,138 @@ function WebRecipes() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
           {results.map((r) => (
-            <WebRecipeCard key={r.id} recipe={r} onDelete={handleDelete} />
+            <WebRecipeCard key={r.id} recipe={r} onDelete={handleDelete} userPrefs={userPrefs} savePrefs={savePrefs} />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── WeeknightDinners ───────────────────────────────────────────────
+
+const WEEKNIGHT_TAG = 'weeknight dinner';
+
+const sectionHeading = {
+  fontSize: '0.7rem',
+  fontWeight: 700,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  color: 'var(--color-accent)',
+  marginBottom: '0.75rem',
+};
+
+function WeeknightDinners({ allRecipes, userPrefs, savePrefs }) {
+  const { handleLike, handleDislike } = useCookbookLikeHandlers(userPrefs, savePrefs);
+  const [webRecipes, setWebRecipes] = useState([]);
+  const [loadingWeb, setLoadingWeb] = useState(true);
+  const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    getDocs(collection(db, 'website_recipes'))
+      .then((snap) => setWebRecipes(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
+      .catch(() => setWebRecipes([]))
+      .finally(() => setLoadingWeb(false));
+  }, []);
+
+  // Tags are one shared store keyed by recipe id, so both sources filter the same way.
+  const hasTag = (id) =>
+    (userPrefs?.recipeTags?.[id] || []).some((t) => t.toLowerCase() === WEEKNIGHT_TAG);
+
+  const cookbookMatches = useMemo(
+    () => searchRecipes(
+      (allRecipes || []).filter((r) => hasTag(r.id)),
+      query,
+      (r) => cookbookFields(r, userPrefs)
+    ),
+    [allRecipes, userPrefs, query]
+  );
+
+  const webMatches = useMemo(
+    () => searchRecipes(
+      webRecipes.filter((r) => hasTag(r.id)),
+      query,
+      (r) => webFields(r, userPrefs)
+    ),
+    [webRecipes, userPrefs, query]
+  );
+
+  async function handleDelete(id) {
+    try {
+      await deleteDoc(doc(db, 'website_recipes', id));
+      setWebRecipes((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      console.error('Failed to delete recipe:', err);
+    }
+  }
+
+  if (!allRecipes || loadingWeb) {
+    return <p style={{ color: 'var(--color-text-muted)' }}>Loading…</p>;
+  }
+
+  const total = cookbookMatches.length + webMatches.length;
+  const hasQuery = query.trim().length > 0;
+  const taggedAny = Object.values(userPrefs?.recipeTags || {}).some((tags) =>
+    tags.some((t) => t.toLowerCase() === WEEKNIGHT_TAG)
+  );
+
+  if (!taggedAny) {
+    return (
+      <EmptyState
+        message={`No recipes tagged “${WEEKNIGHT_TAG}” yet. Add that tag to any recipe and it’ll appear here.`}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <SearchInput
+        placeholder="Search weeknight dinners…"
+        value={query}
+        onChange={setQuery}
+      />
+      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', margin: '1rem 0 1.5rem' }}>
+        {total} recipe{total === 1 ? '' : 's'}
+        {hasQuery ? ` matching “${query.trim()}”` : ` tagged “${WEEKNIGHT_TAG}”`}
+      </p>
+
+      {total === 0 && (
+        <EmptyState message={`No weeknight dinners match “${query.trim()}”.`} />
+      )}
+
+      {cookbookMatches.length > 0 && (
+        <section style={{ marginBottom: '2rem' }}>
+          <div style={sectionHeading}>From my cookbooks</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {cookbookMatches.map((r) => (
+              <RecipeCard
+                key={r.id}
+                recipe={r}
+                userPrefs={userPrefs}
+                savePrefs={savePrefs}
+                onLike={handleLike}
+                onDislike={handleDislike}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {webMatches.length > 0 && (
+        <section>
+          <div style={sectionHeading}>Saved from the web</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {webMatches.map((r) => (
+              <WebRecipeCard
+                key={r.id}
+                recipe={r}
+                onDelete={handleDelete}
+                userPrefs={userPrefs}
+                savePrefs={savePrefs}
+              />
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );
@@ -1249,7 +1467,7 @@ function scoreRecipes(cookbookRecipes, webRecipes, userPrefs, jitterSeed) {
       ...r,
       _source: 'web',
       _ingredients: r.ingredients || [],
-      _categories: r.tags || [],
+      _categories: userPrefs.recipeTags?.[r.id] || r.tags || [],
     })),
   ];
 
@@ -1596,6 +1814,12 @@ export default function Cookbooks() {
           Saved from Web
         </button>
         <button
+          style={styles.tab(activeTab === 'weeknight')}
+          onClick={() => { setActiveTab('weeknight'); clearBook(); }}
+        >
+          Weeknight Dinners
+        </button>
+        <button
           style={styles.tab(activeTab === 'recommendations')}
           onClick={() => setActiveTab('recommendations')}
         >
@@ -1608,7 +1832,10 @@ export default function Cookbooks() {
           ? <RecipeBrowser bookId={bookId} onBack={clearBook} allRecipes={allRecipes} userPrefs={userPrefs} savePrefs={savePrefs} />
           : <CookbookIndex onSelectBook={selectBook} allRecipes={allRecipes} userPrefs={userPrefs} savePrefs={savePrefs} />
       )}
-      {activeTab === 'web' && <WebRecipes />}
+      {activeTab === 'web' && <WebRecipes userPrefs={userPrefs} savePrefs={savePrefs} />}
+      {activeTab === 'weeknight' && (
+        <WeeknightDinners allRecipes={allRecipes} userPrefs={userPrefs} savePrefs={savePrefs} />
+      )}
       {activeTab === 'recommendations' && (
         <RecommendationsTab
           allRecipes={allRecipes}
