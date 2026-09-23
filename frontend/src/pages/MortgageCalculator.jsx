@@ -75,6 +75,10 @@ const styles = {
     color: 'var(--color-text)', lineHeight: 1.15,
   },
   statLabel: { fontSize: '0.78rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' },
+  statPct: {
+    fontSize: '0.9rem', fontWeight: 600, fontFamily: 'var(--font-body)',
+    color: 'var(--color-text-muted)', marginLeft: '0.35rem',
+  },
   chartContainer: {
     background: 'var(--color-surface)', border: '1px solid var(--color-border)',
     borderRadius: '12px', padding: '1rem', marginBottom: '1.25rem', position: 'relative',
@@ -536,8 +540,24 @@ export default function MortgageCalculator() {
     const baselinePayoffDate = baseline.schedule[baseline.schedule.length - 1]?.date;
     const periodsSaved = baseline.schedule.length - actual.schedule.length;
     const yearsSaved = periodsSaved / actual.freqDef.periodsPerYear;
+
+    // Split of the payment you're on right now: the next payment due on or
+    // after today, or the first payment if the loan hasn't started yet.
+    // Extra payments are excluded so the two shares always sum to 100%.
+    const now = Date.now();
+    const current =
+      actual.schedule.find((r) => r.date.getTime() >= now) ||
+      actual.schedule[actual.schedule.length - 1];
+    const currentScheduled = current ? current.principal + current.interest : 0;
+    const principalShare = currentScheduled > 0 ? (current.principal / currentScheduled) * 100 : 0;
+
     return {
       payment: actual.initialPayment,
+      currentDate: current ? current.date : null,
+      currentPrincipal: current ? current.principal : 0,
+      currentInterest: current ? current.interest : 0,
+      principalShare,
+      interestShare: currentScheduled > 0 ? 100 - principalShare : 0,
       payoffDate,
       baselinePayoffDate,
       totalInterestActual,
@@ -675,6 +695,20 @@ export default function MortgageCalculator() {
           <div style={styles.statCard}>
             <div style={styles.statValue}>{formatCurrency(stats.payment, 2)}</div>
             <div style={styles.statLabel}>Payment per period</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statValue}>
+              {formatCurrency(stats.currentPrincipal, 2)}
+              <span style={styles.statPct}>{stats.principalShare.toFixed(1)}%</span>
+            </div>
+            <div style={styles.statLabel}>Current principal portion</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statValue}>
+              {formatCurrency(stats.currentInterest, 2)}
+              <span style={styles.statPct}>{stats.interestShare.toFixed(1)}%</span>
+            </div>
+            <div style={styles.statLabel}>Current interest portion</div>
           </div>
           <div style={styles.statCard}>
             <div style={styles.statValue}>{formatDate(stats.payoffDate)}</div>
