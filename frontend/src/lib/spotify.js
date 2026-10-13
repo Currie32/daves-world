@@ -8,6 +8,7 @@ const SCOPES = [
   'playlist-modify-public', 'playlist-modify-private',
   'user-library-read', 'user-read-playback-position',
   'user-read-playback-state', 'user-modify-playback-state',
+  'user-read-recently-played', 'user-top-read',
 ].join(' ');
 
 function randomBytes(len) {
@@ -119,10 +120,16 @@ export async function completeAuth(clientId = CLIENT_ID) {
   return getToken(clientId);
 }
 
-export async function spGet(path, token) {
+// Retries rate-limited (429) requests after Spotify's Retry-After delay.
+export async function spGet(path, token, attempt = 0) {
   const res = await fetch(`https://api.spotify.com/v1${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  if (res.status === 429 && attempt < 3) {
+    const wait = Math.min(Number(res.headers.get('Retry-After')) || 2, 10);
+    await new Promise(r => setTimeout(r, wait * 1000));
+    return spGet(path, token, attempt + 1);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     const e = new Error(err?.error?.message || res.statusText);

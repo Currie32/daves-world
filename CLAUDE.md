@@ -33,7 +33,7 @@ firestore.rules      # Firestore security rules
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
 | `/events` | Events.jsx | Metro Vancouver events browser: search, map, calendar |
 | `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
-| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab placeholder |
+| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded) |
 
 ## Design System
 
@@ -64,6 +64,7 @@ firestore.rules      # Firestore security rules
 - **MapLibre GL + OpenFreeMap**: Vector tile map rendering for Trail Poster (no API key needed)
 - **MapTiler**: Contour tile source for elevation lines in Trail Poster (free tier, requires API key)
 - **Google Books API**: Search and volume lookups for Book Finder
+- **iTunes Search API**: No-key, CORS-enabled artist genre fallback for Better Spotify song recs when Spotify returns no artist genres (~20 req/min; cached in localStorage)
 - **Hugging Face (transformers.js)**: `Xenova/all-MiniLM-L6-v2` sentence embeddings run in-browser in a Web Worker (`lib/embedWorker.js`) for Better Spotify podcast recommendations; model downloaded from the HF hub on first use, no key
 - **multpl.com**: Scraped server-side (BeautifulSoup, Cloud Function `fetch_pe_data`) for S&P 500 P/E and CAPE data
 - **Metro Vancouver municipal/tourism event sources**: Scraped server-side (`.ics` feeds, "The Events Calendar" REST API, JSON-LD) for Events — Coquitlam, Port Moody, Port Coquitlam, Tourism Coquitlam, Destination Vancouver, Metro Vancouver Regional Parks, Tourism Burnaby, New Westminster
