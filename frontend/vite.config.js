@@ -13,7 +13,7 @@ export default defineConfig({
       manifest: {
         name: "Dave's World",
         short_name: "Dave's World",
-        description: "Dave's personal collection of tools: cookbooks, recommendations, weather, movies, trail posters, and more.",
+        description: "Dave's personal collection of tools: recipes, recommendations, weather, movies, trail posters, and more.",
         start_url: '/',
         scope: '/',
         display: 'standalone',

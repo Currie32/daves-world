@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Cookbooks from './pages/Cookbooks';
 import PlaylistGenerator from './pages/PlaylistGenerator';
@@ -21,7 +21,8 @@ export default function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<Home />} />
-          <Route path="/cookbooks" element={<Cookbooks />} />
+          <Route path="/recipes" element={<Cookbooks />} />
+          <Route path="/cookbooks" element={<Navigate to="/recipes" replace />} />
           <Route path="/playlist-generator" element={<PlaylistGenerator />} />
           <Route path="/recommendations" element={<Recommendations />} />
           <Route path="/weather-forecast" element={<WeatherForecast />} />

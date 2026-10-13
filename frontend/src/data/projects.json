@@ -1,10 +1,10 @@
 [
   {
-    "id": "cookbooks",
-    "title": "Cookbooks",
+    "id": "recipes",
+    "title": "Recipes",
     "description": "A searchable index of cookbooks.",
     "emoji": "📚",
-    "route": "/cookbooks",
+    "route": "/recipes",
     "comingSoon": false
   },
   {

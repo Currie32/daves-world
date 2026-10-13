@@ -23,7 +23,7 @@ firestore.rules      # Firestore security rules
 | Route | File | Description |
 |---|---|---|
 | `/` | Home.jsx | Landing page with project cards |
-| `/cookbooks` | Cookbooks.jsx | Cookbook browser, recipe search, web recipe import |
+| `/recipes` | Cookbooks.jsx | Recipe/cookbook browser, recipe search, web recipe import |
 | `/playlist-generator` | PlaylistGenerator.jsx | Spotify music discovery with playback + feedback |
 | `/recommendations` | Recommendations.jsx | Curated recommendations with map + admin CRUD |
 | `/weather-forecast` | WeatherForecast.jsx | Ensemble weather forecast with uncertainty viz |

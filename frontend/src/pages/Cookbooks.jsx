@@ -430,6 +430,16 @@ function useCookbookLikeHandlers(userPrefs, savePrefs) {
   return { handleLike, handleDislike };
 }
 
+function useIsMobile(breakpoint = 640) {
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < breakpoint);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
 function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   const { handleLike, handleDislike } = useCookbookLikeHandlers(userPrefs, savePrefs);
   const [query, setQuery] = useState('');
@@ -437,6 +447,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [selectedFilters, setSelectedFilters] = useState([]);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const isMobile = useIsMobile();
   const containerRef = useRef(null);
   const dropdownRef = useRef(null);
 
@@ -635,7 +646,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
             if (e.key === 'ArrowDown') {
               e.preventDefault();
               setHighlightedIndex((i) => {
-                const next = Math.min(i + 1, suggestions.length - 1);
+                const next = Math.min(i + 1, (isMobile ? Math.min(suggestions.length, 15) : suggestions.length) - 1);
                 dropdownRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
                 return next;
               });
@@ -652,7 +663,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
             }
           }}
         />
-        {showDropdown && query && suggestions.length > 0 && (
+        {!isMobile && showDropdown && query && suggestions.length > 0 && (
           <div style={{
             position: 'absolute',
             top: '100%',
@@ -725,6 +736,57 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
           👍 only
         </button>
       </div>
+
+      {/* Mobile only: inline suggestion chips instead of an overlay, so the
+          results stay visible above the keyboard. Tap to turn the text into a filter. */}
+      {isMobile && showDropdown && query && suggestions.length > 0 && (
+        <div
+          ref={dropdownRef}
+          style={{
+            display: 'flex',
+            gap: '0.5rem',
+            marginTop: '0.6rem',
+            overflowX: 'auto',
+            paddingBottom: '0.25rem',
+            WebkitOverflowScrolling: 'touch',
+            scrollbarWidth: 'none',
+          }}
+        >
+          {suggestions.slice(0, 15).map((s, i) => (
+            <button
+              key={`${s.type}:${s.value}`}
+              onMouseEnter={() => setHighlightedIndex(i)}
+              onClick={() => addFilter(s)}
+              style={{
+                flexShrink: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+                padding: '0.35rem 0.75rem',
+                background: i === highlightedIndex ? 'var(--color-border)' : 'var(--color-surface)',
+                border: '1px solid var(--color-border)',
+                borderRadius: '999px',
+                fontFamily: 'var(--font-body)',
+                fontSize: '0.85rem',
+                color: 'var(--color-text)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <span style={{
+                fontSize: '0.65rem',
+                fontWeight: 600,
+                color: 'var(--color-text-muted)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+              }}>
+                {TYPE_LABEL[s.type]}
+              </span>
+              {s.value}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Active filter chips (liked-only has its own toggle button above) */}
       {selectedFilters.some((f) => f.type !== 'liked') && (
@@ -1796,7 +1858,7 @@ export default function Cookbooks() {
   return (
     <div style={styles.page}>
       <PageHeader
-        title="Cookbooks"
+        title="Recipes"
         subtitle="Browse my cookbook collection and recipes saved from the web."
       />
 
