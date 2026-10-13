@@ -15,6 +15,12 @@ const SONGS_PER_GENRE = 8;
 const MICRO_GENRES_PER_BUCKET = 3;
 const ITUNES_LOOKUPS = 20;            // iTunes allows ~20 requests/minute
 const ITUNES_CACHE_KEY = 'bs_itunes_genre_v1';
+const MAX_LIBRARY = 5000;             // liked songs checked for "already have it"
+// Saved between runs to keep request counts (and Spotify 429s) down.
+const LIBRARY_CACHE_KEY = 'bs_liked_v1';
+const LIBRARY_TTL = 7 * 86_400_000;    // full re-read weekly (catches un-likes)
+const GENRE_CACHE_KEY = 'bs_artist_genres_v1';
+const GENRE_TTL = 30 * 86_400_000;
 
 // Order matters: each genre string goes to the first bucket that matches it.
 const BUCKETS = [
@@ -71,6 +77,15 @@ function artistBucket(genres) {
   return best;
 }
 
+// "Same song" key per credited artist: title without "(feat. …)", "[Live]",
+// " - Remastered 2011" etc., so album/single/remaster versions all match.
+export function songKeys(t) {
+  const norm = x => (x || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[([].*?[)\]]/g, ' ').replace(/\s+-\s+.*$/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  const title = norm(t.name);
+  return (t.artists || []).map(a => `${title}|${norm(a.name)}`);
+}
+
 function isKidsTrack(t) {
   return [t.name, t.album?.name, ...(t.artists || []).map(a => a.name)].some(n => n && KIDS_NAMES.test(n));
 }
@@ -99,7 +114,48 @@ function shuffle(arr) {
 
 // ─── Listening history ───────────────────────────────────────────────────────
 
-async function loadHistory(token, errors) {
+function readJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; }
+}
+function writeJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota */ }
+}
+
+// Only the fields recommendations use, so the saved library stays small.
+const compactLiked = i => ({
+  added_at: i.added_at,
+  track: {
+    id: i.track.id, name: i.track.name, type: i.track.type,
+    artists: (i.track.artists || []).map(a => ({ id: a.id, name: a.name })),
+    album: { name: i.track.album?.name },
+  },
+});
+
+// Every liked song (newest first), capped at MAX_LIBRARY. Uses the saved copy
+// plus the first page when only new likes were added (1 request instead of ~100).
+async function loadLibrary(token, debug) {
+  const first = await spGet('/me/tracks?limit=50', token);
+  const firstItems = (first.items || []).filter(i => i.track);
+  const cached = readJson(LIBRARY_CACHE_KEY, null);
+  if (cached && Date.now() - cached.at < LIBRARY_TTL) {
+    const k = cached.items.length ? firstItems.findIndex(i => i.track.id === cached.items[0].track.id) : -1;
+    if (k >= 0 && first.total === cached.total + k) {
+      const items = [...firstItems.slice(0, k).map(compactLiked), ...cached.items];
+      if (k) writeJson(LIBRARY_CACHE_KEY, { ...cached, total: first.total, items });
+      debug.libraryRequests = 1;
+      return items;
+    }
+  }
+  const offsets = [];
+  for (let o = 50; o < Math.min(first.total || 0, MAX_LIBRARY); o += 50) offsets.push(o);
+  const pages = await mapLimit(offsets, 3, o => spGet(`/me/tracks?limit=50&offset=${o}`, token));
+  const items = [first, ...pages].flatMap(p => p?.items || []).filter(i => i.track).map(compactLiked);
+  if (!pages.includes(null)) writeJson(LIBRARY_CACHE_KEY, { at: Date.now(), total: first.total, items });
+  debug.libraryRequests = 1 + offsets.length;
+  return items;
+}
+
+async function loadHistory(token, library, errors) {
   const cutoff = Date.now() - HISTORY_DAYS * 86_400_000;
   const plays = new Map();   // track id → { track, weight }
   const add = (track, weight) => {
@@ -109,24 +165,14 @@ async function loadHistory(token, errors) {
   };
   const safe = (label, p) => p.catch(e => { errors.push(`${label}: ${e.status || ''} ${e.message}`); return null; });
 
-  const [recent, top, saved] = await Promise.all([
+  const [recent, top] = await Promise.all([
     safe('recently played', spGet('/me/player/recently-played?limit=50', token)),
     safe('top tracks', spGet('/me/top/tracks?time_range=short_term&limit=50', token)),
-    safe('liked songs', (async () => {
-      const items = [];
-      for (let offset = 0; offset < 200; offset += 50) {
-        const page = await spGet(`/me/tracks?limit=50&offset=${offset}`, token);
-        const fresh = (page.items || []).filter(i => new Date(i.added_at).getTime() >= cutoff);
-        items.push(...fresh);
-        if (fresh.length < (page.items || []).length || !page.next) break;
-      }
-      return { items };
-    })()),
   ]);
 
   (recent?.items || []).forEach(i => { if (new Date(i.played_at).getTime() >= cutoff) add(i.track, 1); });
   (top?.items || []).forEach((t, i) => add(t, 3 + (50 - i) / 25));   // higher rank → more weight
-  (saved?.items || []).forEach(i => add(i.track, 1));
+  library.forEach(i => { if (new Date(i.added_at).getTime() >= cutoff) add(i.track, 1); });
   return [...plays.values()];
 }
 
@@ -148,15 +194,20 @@ async function itunesGenre(name) {
 // Returns Map(artist id → { name, genres: string[], bucket }).
 async function loadArtistGenres(token, artists, debug) {
   const info = new Map();
-  await mapLimit(artists, 5, async a => {
+  const saved = readJson(GENRE_CACHE_KEY, {});
+  const stale = a => !saved[a.id] || Date.now() - saved[a.id].at > GENRE_TTL;
+  const toFetch = artists.filter(stale);
+  debug.artistRequests = toFetch.length;
+  await mapLimit(toFetch, 3, async a => {
     try {
       const full = await spGet(`/artists/${a.id}`, token);
-      info.set(a.id, { name: a.name, genres: full.genres || [] });
+      saved[a.id] = { g: full.genres || [], at: Date.now() };
     } catch (e) {
       debug.errors.push(`artist ${a.name}: ${e.status || ''} ${e.message}`);
-      info.set(a.id, { name: a.name, genres: [] });
     }
   });
+  writeJson(GENRE_CACHE_KEY, saved);
+  for (const a of artists) info.set(a.id, { name: a.name, genres: [...(saved[a.id]?.g || [])] });
 
   // Fall back to iTunes for artists Spotify has no genres for, most-played first.
   const cache = readItunesCache();
@@ -194,11 +245,14 @@ async function searchTracks(token, q, offset, debug) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-export async function recommendSongs({ token, onProgress }) {
+// `dismissed`: { ids: [], keys: [] } of songs the user X'd — never recommended again.
+export async function recommendSongs({ token, onProgress, dismissed = { ids: [], keys: [] } }) {
   const debug = { errors: [], queries: [] };
 
-  onProgress?.('Reading your listening history…');
-  const history = (await loadHistory(token, debug.errors)).filter(p => !isKidsTrack(p.track));
+  onProgress?.('Reading your liked songs and listening history…');
+  const library = await loadLibrary(token, debug).catch(e => { debug.errors.push(`liked songs: ${e.status || ''} ${e.message}`); return []; });
+  debug.likedSongs = library.length;
+  const history = (await loadHistory(token, library, debug.errors)).filter(p => !isKidsTrack(p.track));
   debug.historyTracks = history.length;
   if (!history.length) return { sections: [], debug };
 
@@ -242,8 +296,10 @@ export async function recommendSongs({ token, onProgress }) {
   debug.genres = top.map(b => b.name);
   if (!top.length) return { sections: [], debug };
 
-  const knownTracks = new Set(history.map(p => p.track.id));
-  const knownTitles = new Set(history.map(p => `${p.track.name}|${p.track.artists?.[0]?.name}`.toLowerCase()));
+  // Songs never to recommend: anything played or liked (any version), or dismissed.
+  const knownTracks = new Set([...history.map(p => p.track.id), ...library.map(i => i.track.id), ...dismissed.ids]);
+  const knownSongs = new Set([...history.map(p => p.track), ...library.map(i => i.track)].flatMap(songKeys));
+  dismissed.keys.forEach(k => knownSongs.add(k));
   const knownArtists = new Set(artists.map(a => a.id));
 
   onProgress?.(`Searching ${top.map(b => b.name).join(', ')}…`);
@@ -266,7 +322,7 @@ export async function recommendSongs({ token, onProgress }) {
     for (const t of results[i] || []) {
       if (knownTracks.has(t.id) || isKidsTrack(t)) continue;
       if ((t.artists || []).some(a => knownArtists.has(a.id) || kidsArtists.has(a.id))) continue;
-      if (knownTitles.has(`${t.name}|${t.artists?.[0]?.name}`.toLowerCase())) continue;
+      if (songKeys(t).some(k => knownSongs.has(k))) continue;
       const m = perBucket.get(p.bucket);
       const cur = m.get(t.id) || { track: t, hits: 0 };
       cur.hits++;
@@ -284,7 +340,7 @@ export async function recommendSongs({ token, onProgress }) {
     const recs = [];
     for (const { track } of ranked) {
       const artistId = track.artists?.[0]?.id;
-      const titleKey = `${track.name}|${track.artists?.[0]?.name}`.toLowerCase();
+      const titleKey = songKeys(track)[0];
       if (usedTracks.has(track.id) || usedArtists.has(artistId) || usedTitles.has(titleKey)) continue;
       usedTracks.add(track.id); usedArtists.add(artistId); usedTitles.add(titleKey);
       recs.push(track);

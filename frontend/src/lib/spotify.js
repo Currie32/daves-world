@@ -120,21 +120,61 @@ export async function completeAuth(clientId = CLIENT_ID) {
   return getToken(clientId);
 }
 
-// Retries rate-limited (429) requests after Spotify's Retry-After delay.
-export async function spGet(path, token, attempt = 0) {
-  const res = await fetch(`https://api.spotify.com/v1${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (res.status === 429 && attempt < 3) {
-    const wait = Math.min(Number(res.headers.get('Retry-After')) || 2, 10);
-    await new Promise(r => setTimeout(r, wait * 1000));
-    return spGet(path, token, attempt + 1);
+// All Web API GETs go through one queue: at most MAX_IN_FLIGHT at a time, and
+// when Spotify answers 429 every queued request waits out its Retry-After
+// (instead of each retrying on its own and making the throttling worse).
+// A wait longer than MAX_WAIT_S fails fast with a readable error.
+const MAX_IN_FLIGHT = 3;
+const MAX_WAIT_S = 30;
+let inFlight = 0;
+const queue = [];
+let pausedUntil = 0;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function acquire() {
+  if (inFlight >= MAX_IN_FLIGHT) await new Promise(r => queue.push(r));
+  inFlight++;
+}
+function release() {
+  inFlight--;
+  queue.shift()?.();
+}
+
+function rateLimitError(seconds) {
+  const mins = Math.ceil(seconds / 60);
+  const e = new Error(`Spotify is rate-limiting this app — try again in ${mins > 1 ? `${mins} minutes` : 'a minute'}.`);
+  e.status = 429;
+  e.retryAfter = seconds;
+  return e;
+}
+
+export async function spGet(path, token) {
+  await acquire();
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const wait = pausedUntil - Date.now();
+      if (wait > MAX_WAIT_S * 1000) throw rateLimitError(wait / 1000);
+      if (wait > 0) await sleep(wait);
+
+      const res = await fetch(`https://api.spotify.com/v1${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 429) {
+        const retry = Number(res.headers.get('Retry-After')) || 5;
+        pausedUntil = Math.max(pausedUntil, Date.now() + retry * 1000);
+        if (retry > MAX_WAIT_S || attempt >= 2) throw rateLimitError(retry);
+        continue;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const e = new Error(err?.error?.message || res.statusText);
+        e.status = res.status;
+        throw e;
+      }
+      return res.json();
+    }
+  } finally {
+    release();
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    const e = new Error(err?.error?.message || res.statusText);
-    e.status = res.status;
-    throw e;
-  }
-  return res.json();
 }

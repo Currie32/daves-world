@@ -16,7 +16,7 @@ import { embed, dot } from './embeddings';
 
 const MAX_SOURCES = 8;
 const ENTITY_QUERIES = 2;
-const DETAILS_PER_SOURCE = 8;
+const DETAILS_PER_SOURCE = 5;
 const RECS_PER_SOURCE = 4;
 const MIN_SIMILARITY = 0.35;
 const MAX_AGE_DAYS = 90;

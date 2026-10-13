@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { startAuth, completeAuth, getToken, clearTokens, spGet } from '../lib/spotify';
+import { recommendSongs, songKeys } from '../lib/musicRecs';
 
 // Better Spotify uses its own Spotify app (separate redirect URIs from Playlist Generator).
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_BETTER_CLIENT_ID || '';
@@ -7,11 +8,10 @@ const CLIENT_ID = import.meta.env.VITE_SPOTIFY_BETTER_CLIENT_ID || '';
 const RECENT_DAYS = 14;
 const LISTENED_DAYS = 30;
 const LISTENED_MIN_MS = 20 * 60_000;
-const CACHE_KEY = 'bs_podcasts_v3';
-const CACHE_TTL = 10 * 60_000;
 const RECS_KEY = 'bs_recs_v7';
 const RECS_TTL = 72 * 3600_000;
-const MUSIC_RECS_KEY = 'bs_music_recs_v1';
+const MUSIC_RECS_KEY = 'bs_music_recs_v2';
+const DISMISSED_KEY = 'bs_music_dismissed_v1';
 const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 // ─── Data loading ────────────────────────────────────────────────────────────
@@ -47,21 +47,75 @@ function parseRelease(d) {
   return y ? new Date(y, m - 1, day) : new Date(0);
 }
 
-async function loadPodcasts(token) {
-  const shows = await getFollowedShows(token);
-  const episodeLists = await mapLimit(shows, 5, show =>
-    spGet(`/shows/${show.id}/episodes?limit=20`, token).then(d => (d.items || []).filter(Boolean)),
-  );
+// Access tokens last an hour; always fetch a current one (refreshing if needed)
+// rather than reusing the one the page loaded with.
+async function freshToken() {
+  const t = await getToken(CLIENT_ID);
+  if (!t) throw new Error('Your Spotify session expired — Disconnect and connect again.');
+  return t;
+}
+
+// "429 ×12 (retry in 30s), 404 ×1" — why show requests failed.
+function summarizeErrors(errors) {
+  const by = new Map();
+  for (const e of errors) {
+    const k = e.status || 'network';
+    const cur = by.get(k) || { n: 0, msg: e.message, retry: e.retryAfter };
+    cur.n++;
+    by.set(k, cur);
+  }
+  return [...by].map(([k, v]) => `${k} ${v.msg}${v.n > 1 ? ` ×${v.n}` : ''}${v.retry ? ` (retry in ${v.retry}s)` : ''}`).join(', ');
+}
+
+// Per-show episode cache (localStorage) so a load only asks Spotify about shows
+// that changed. /me/shows reports each show's total_episodes, so a new episode
+// is detected without fetching. Shows with recent episodes are still refetched
+// now and then (and on Refresh) to pick up listening progress.
+const EPS_CACHE_KEY = 'bs_show_eps_v1';
+const PROGRESS_TTL = 60 * 60_000;          // shows with recent episodes: progress up to 1h old
+const IDLE_TTL = 7 * 86_400_000;           // shows with nothing recent: recheck weekly
+
+function readEpsCache() {
+  try { return JSON.parse(localStorage.getItem(EPS_CACHE_KEY) || '{}'); } catch { return {}; }
+}
+
+// Keep only what the page uses, and only the latest episode + the last LISTENED_DAYS.
+function trimEpisodes(items, listenedCutoff) {
+  return items
+    .map(ep => ({ ...ep, _date: parseRelease(ep.release_date).getTime() }))
+    .sort((a, b) => b._date - a._date)
+    .filter((ep, i) => i === 0 || ep._date >= listenedCutoff)
+    .map(ep => ({
+      id: ep.id, name: ep.name, uri: ep.uri, release_date: ep.release_date, _date: ep._date,
+      duration_ms: ep.duration_ms, resume_point: ep.resume_point, images: ep.images,
+      language: ep.language, languages: ep.languages, description: (ep.description || '').slice(0, 1500),
+    }));
+}
+
+function needsFetch(show, entry, force) {
+  if (!entry || show.total_episodes == null || show.total_episodes !== entry.total) return true;
+  const age = Date.now() - entry.at;
+  const hasRecent = entry.eps.some(ep => ep._date >= Date.now() - LISTENED_DAYS * 86_400_000);
+  if (hasRecent) return force || age > PROGRESS_TTL;
+  return age > IDLE_TTL;
+}
+
+const SHOWS_CACHE_KEY = 'bs_followed_v1';
+
+function readShowsCache() {
+  try { return JSON.parse(localStorage.getItem(SHOWS_CACHE_KEY) || '[]'); } catch { return []; }
+}
+
+// Assemble the page's data from the followed shows + whatever episodes are cached.
+function buildPodcastData(shows, cache) {
   const cutoff = Date.now() - RECENT_DAYS * 86_400_000;
   // Spotify exposes no podcast listening history, so "listened in the past
   // month" = episodes released in that window that were finished or started.
   const listenedCutoff = Date.now() - LISTENED_DAYS * 86_400_000;
   const recent = [];
   const listened = [];
-  const showRows = shows.map((show, i) => {
-    const eps = (episodeLists[i] || [])
-      .map(ep => ({ ...ep, _date: parseRelease(ep.release_date).getTime() }))
-      .sort((a, b) => b._date - a._date);
+  const showRows = shows.map(show => {
+    const eps = cache[show.id]?.eps || [];
     eps.filter(ep => ep._date >= cutoff).forEach(ep => recent.push({ ...ep, _show: show }));
     eps.filter(ep => ep._date >= listenedCutoff && (ep.resume_point?.fully_played || ep.resume_point?.resume_position_ms >= LISTENED_MIN_MS))
       .forEach(ep => listened.push({ ...ep, _show: show }));
@@ -69,9 +123,49 @@ async function loadPodcasts(token) {
   });
   recent.sort((a, b) => b._date - a._date);
   showRows.sort((a, b) => (b._latest?._date || 0) - (a._latest?._date || 0));
-  // A failed request means that show's episodes are missing, not that it has none.
-  const failed = episodeLists.filter(l => l === null).length;
-  return { recent, listened, shows: showRows, failed };
+  return { recent, listened, shows: showRows };
+}
+
+// Streams: `onUpdate(data)` fires with the saved list straight away, then again
+// as each show's new episodes arrive. `data.pending` = shows still loading.
+async function loadPodcasts(token, { force = false, onUpdate }) {
+  const cache = readEpsCache();
+  const saved = readShowsCache();
+  if (saved.length) onUpdate({ ...buildPodcastData(saved, cache), pending: null });
+
+  const shows = (await getFollowedShows(token)).map(sh => ({
+    id: sh.id, name: sh.name, publisher: sh.publisher, images: sh.images, external_urls: sh.external_urls,
+    total_episodes: sh.total_episodes, description: (sh.description || '').slice(0, 500),
+  }));
+  try { localStorage.setItem(SHOWS_CACHE_KEY, JSON.stringify(shows)); } catch { /* quota */ }
+
+  const listenedCutoff = Date.now() - LISTENED_DAYS * 86_400_000;
+  const toFetch = shows.filter(show => needsFetch(show, cache[show.id], force));
+  let pending = toFetch.length;
+  onUpdate({ ...buildPodcastData(shows, cache), pending, toFetch: toFetch.length });
+
+  const errors = [];
+  let failed = 0;
+  await mapLimit(toFetch, 3, async show => {
+    try {
+      const d = await spGet(`/shows/${show.id}/episodes?limit=20`, token);
+      cache[show.id] = { total: show.total_episodes, at: Date.now(), eps: trimEpisodes((d.items || []).filter(Boolean), listenedCutoff) };
+    } catch (e) {
+      errors.push(e); failed++;   // keeps the cached (older) episodes, if any
+    }
+    try { localStorage.setItem(EPS_CACHE_KEY, JSON.stringify(cache)); } catch { /* quota */ }
+    pending--;
+    onUpdate({ ...buildPodcastData(shows, cache), pending, toFetch: toFetch.length });
+  });
+
+  // Forget unfollowed shows.
+  const followed = new Set(shows.map(sh => sh.id));
+  Object.keys(cache).forEach(id => { if (!followed.has(id)) delete cache[id]; });
+  try { localStorage.setItem(EPS_CACHE_KEY, JSON.stringify(cache)); } catch { /* quota */ }
+
+  const final = { ...buildPodcastData(shows, cache), pending: 0 };
+  onUpdate(final);
+  return { failed, total: shows.length, errorSummary: summarizeErrors(errors) };
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
@@ -222,7 +316,7 @@ function readRecsCache(listenedKey) {
   return null;
 }
 
-function RecommendedView({ token, data, onPlay }) {
+function RecommendedView({ data, onPlay }) {
   const listenedKey = data.listened.map(e => e.id).sort().join(',');
   const [result, setResult] = useState(() => readRecsCache(listenedKey));
   const sections = result?.sections;
@@ -239,7 +333,7 @@ function RecommendedView({ token, data, onPlay }) {
           ]);
           onModelProgress(p => p.total && setProgress(`Downloading model (first time only)… ${Math.round(100 * p.loaded / p.total)}%`));
           const out = await recommendEpisodes({
-            token, listened: data.listened, followedShows: data.shows, onProgress: setProgress,
+            token: await freshToken(), listened: data.listened, followedShows: data.shows, onProgress: setProgress,
           });
           try { localStorage.setItem(RECS_KEY, JSON.stringify({ key: listenedKey, at: Date.now(), result: out })); } catch { /* quota */ }
           return out;
@@ -251,7 +345,7 @@ function RecommendedView({ token, data, onPlay }) {
     } finally {
       setProgress('');
     }
-  }, [token, data, listenedKey]);
+  }, [data, listenedKey]);
 
   useEffect(() => {
     if (!sections && data.listened.length) run();
@@ -332,7 +426,7 @@ function usePlayer() {
   return { onPlay, toast };
 }
 
-function PodcastsTab({ token }) {
+function PodcastsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -343,35 +437,25 @@ function PodcastsTab({ token }) {
   const dataRef = useRef(null);
 
   const load = useCallback(async (force = false) => {
-    if (!force) {
-      try {
-        const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || 'null');
-        if (cached && Date.now() - cached.at < CACHE_TTL) { setData(cached.data); dataRef.current = cached.data; return true; }
-      } catch { /* ignore bad cache */ }
-    }
     setLoading(true); setError(''); setNotice('');
     try {
-      const fresh = await loadPodcasts(token);
-      // A partial refresh never replaces a complete list that's already on screen.
-      if (fresh.failed && dataRef.current) {
-        setNotice('Spotify didn’t return everything — showing your previous list. Try again in a minute.');
-        return false;
-      }
-      setData(fresh); dataRef.current = fresh;
-      if (fresh.failed) {
-        setNotice(`Couldn’t load episodes for ${fresh.failed} show${fresh.failed === 1 ? '' : 's'}. Try refreshing in a minute.`);
-      } else {
-        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), data: fresh })); } catch { /* quota */ }
+      const update = d => { setData(d); dataRef.current = d; };
+      const out = await loadPodcasts(await freshToken(), { force, onUpdate: update });
+      if (out.failed) {
+        setNotice(`Spotify didn’t return episodes for ${out.failed} of ${out.total} shows (showing their saved episodes where available): ${out.errorSummary}`);
       }
       return true;
     } catch (e) {
-      if (dataRef.current) setNotice(`Refresh failed (${e.message || 'network error'}) — showing your previous list.`);
+      if (dataRef.current) {
+        setNotice(`Refresh failed (${e.message || 'network error'}) — showing your saved list.`);
+        setData(d => d && { ...d, pending: 0 });
+      }
       else setError(e.message || 'Could not load podcasts.');
       return false;
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
@@ -397,18 +481,22 @@ function PodcastsTab({ token }) {
             </button>
           ))}
         </div>
-        <button style={s.linkBtn} onClick={refresh} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
+        <button style={s.linkBtn} onClick={refresh} disabled={loading}>
+          {!loading ? 'Refresh' : data.pending ? `Updating ${data.toFetch - data.pending}/${data.toFetch} shows…` : 'Refreshing…'}
+        </button>
       </div>
 
       {notice && <div style={{ ...s.error, marginBottom: 12 }}>{notice}</div>}
 
       {view === 'recs' ? (
-        <RecommendedView key={recsNonce} token={token} data={data} onPlay={onPlay} />
+        data.pending !== 0
+          ? <div style={s.muted}>Finishing loading your podcasts…</div>
+          : <RecommendedView key={recsNonce} data={data} onPlay={onPlay} />
       ) : view === 'latest' ? (
         <>
           <p style={s.sectionSub}>From shows you follow, released in the last {RECENT_DAYS} days.</p>
           {data.recent.length === 0 ? (
-            <div style={s.muted}>No new episodes in the last {RECENT_DAYS} days.</div>
+            <div style={s.muted}>{data.pending !== 0 ? 'Loading episodes…' : `No new episodes in the last ${RECENT_DAYS} days.`}</div>
           ) : (
             <div style={s.list}>
               {data.recent.map(ep => <EpisodeRow key={ep.id} ep={ep} onPlay={onPlay} />)}
@@ -419,7 +507,7 @@ function PodcastsTab({ token }) {
         <>
           <p style={s.sectionSub}>Ordered by most recent episode.</p>
           {data.shows.length === 0 ? (
-            <div style={s.muted}>You don’t follow any podcasts yet.</div>
+            <div style={s.muted}>{data.pending !== 0 ? 'Loading shows…' : 'You don’t follow any podcasts yet.'}</div>
           ) : (
             <div style={s.showList}>
               {data.shows.map(show => <ShowRow key={show.id} show={show} onPlay={onPlay} />)}
@@ -445,25 +533,40 @@ function readMusicCache() {
   return null;
 }
 
-function TrackRow({ track, onPlay }) {
+// Songs X'd by the user, kept forever in this browser: { ids: [], keys: [] }.
+function readDismissed() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DISMISSED_KEY) || 'null');
+    if (d?.ids && d?.keys) return d;
+  } catch { /* ignore */ }
+  return { ids: [], keys: [] };
+}
+
+function TrackRow({ track, onPlay, onDismiss }) {
   return (
-    <button style={s.episode(false)} onClick={() => onPlay(track)} title="Play in Spotify">
-      <img src={imageUrl(track.album?.images)} alt="" style={s.trackArt} />
-      <div style={s.epBody}>
-        <div style={s.trackTitle}>{track.name}</div>
-        <div style={s.trackArtist}>{track.artists.map(a => a.name).join(', ')}</div>
-        <div style={s.epMeta}>
-          <span style={s.trackAlbum}>{track.album?.name}</span>
-          <span>·</span>
-          <span>{track.album?.release_date?.slice(0, 4)}</span>
+    <div style={s.trackRow}>
+      <button style={s.trackMain} onClick={() => onPlay(track)} title="Play in Spotify">
+        <img src={imageUrl(track.album?.images)} alt="" style={s.trackArt} />
+        <div style={s.epBody}>
+          <div style={s.trackTitle}>{track.name}</div>
+          <div style={s.trackArtist}>{track.artists.map(a => a.name).join(', ')}</div>
+          <div style={s.epMeta}>
+            <span style={s.trackAlbum}>{track.album?.name}</span>
+            <span>·</span>
+            <span>{track.album?.release_date?.slice(0, 4)}</span>
+          </div>
         </div>
-      </div>
-      <span style={s.playIcon}><PlayIcon /></span>
-    </button>
+        <span style={s.playIcon}><PlayIcon /></span>
+      </button>
+      <button style={s.dismissBtn} onClick={() => onDismiss(track)}
+        title="Never recommend this song" aria-label={`Never recommend ${track.name}`}>
+        <CloseIcon />
+      </button>
+    </div>
   );
 }
 
-function MusicTab({ token }) {
+function MusicTab() {
   const [result, setResult] = useState(readMusicCache);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
@@ -474,8 +577,7 @@ function MusicTab({ token }) {
     try {
       if (!musicInFlight) {
         musicInFlight = (async () => {
-          const { recommendSongs } = await import('../lib/musicRecs');
-          const out = await recommendSongs({ token, onProgress: setProgress });
+          const out = await recommendSongs({ token: await freshToken(), onProgress: setProgress, dismissed: readDismissed() });
           try { localStorage.setItem(MUSIC_RECS_KEY, JSON.stringify({ at: Date.now(), result: out })); } catch { /* quota */ }
           return out;
         })().finally(() => { musicInFlight = null; });
@@ -486,11 +588,33 @@ function MusicTab({ token }) {
     } finally {
       setProgress('');
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => {
     if (!result) run();
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Remember the song so it's never recommended again, and drop it from the saved results.
+  const dismiss = useCallback(track => {
+    const d = readDismissed();
+    d.ids.push(track.id);
+    d.keys.push(...songKeys(track));
+    try { localStorage.setItem(DISMISSED_KEY, JSON.stringify(d)); } catch { /* quota */ }
+    setResult(prev => {
+      if (!prev) return prev;
+      const next = {
+        ...prev,
+        sections: prev.sections
+          .map(sec => ({ ...sec, recs: sec.recs.filter(t => t.id !== track.id) }))
+          .filter(sec => sec.recs.length),
+      };
+      try {
+        const c = JSON.parse(localStorage.getItem(MUSIC_RECS_KEY) || 'null');
+        if (c) localStorage.setItem(MUSIC_RECS_KEY, JSON.stringify({ ...c, result: next }));
+      } catch { /* ignore */ }
+      return next;
+    });
   }, []);
 
   const busy = !result && !error;
@@ -523,7 +647,7 @@ function MusicTab({ token }) {
               <span style={s.recSectionShow}>Because you played {basedOn.join(', ')}</span>
             </div>
             <div style={s.list}>
-              {recs.map(t => <TrackRow key={t.id} track={t} onPlay={onPlay} />)}
+              {recs.map(t => <TrackRow key={t.id} track={t} onPlay={onPlay} onDismiss={dismiss} />)}
             </div>
           </section>
         ))
@@ -539,6 +663,8 @@ function MusicDebug({ debug }) {
     ['Songs played (last 3 months)', debug.historyTracks],
     ['Artists', debug.artists],
     ['Artists with genres', debug.artistsWithGenres],
+    ['Liked songs checked', debug.likedSongs],
+    ['Spotify requests (library / artists / searches)', debug.libraryRequests !== undefined ? `${debug.libraryRequests} / ${debug.artistRequests} / ${debug.queries?.length}` : undefined],
     ['iTunes genre lookups', debug.itunesLookups],
     ["Kids' songs dropped", debug.kidsTracksDropped],
     ['Genres', debug.genres?.join(', ')],
@@ -620,7 +746,7 @@ export default function BetterSpotify() {
           {user.images?.[0]?.url && <img src={user.images[0].url} alt="" style={s.avatar} />}
           <span style={s.userName}>{user.display_name}</span>
           <button style={s.disconnectBtn} onClick={() => {
-            clearTokens(CLIENT_ID); sessionStorage.removeItem(CACHE_KEY); localStorage.removeItem(MUSIC_RECS_KEY); setToken(null); setUser(null);
+            clearTokens(CLIENT_ID); localStorage.removeItem(EPS_CACHE_KEY); localStorage.removeItem(SHOWS_CACHE_KEY); localStorage.removeItem(MUSIC_RECS_KEY); setToken(null); setUser(null);
           }}>Disconnect</button>
         </div>
       )}
@@ -633,7 +759,7 @@ export default function BetterSpotify() {
         ))}
       </div>
 
-      {tab === 'podcasts' ? <PodcastsTab token={token} /> : <MusicTab token={token} />}
+      {tab === 'podcasts' ? <PodcastsTab /> : <MusicTab />}
     </div>
   );
 }
@@ -644,6 +770,14 @@ function SpotifyIcon({ size = 20 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.371-.721.49-1.101.241-3.021-1.858-6.832-2.278-11.322-1.237-.43.101-.86-.18-.96-.61-.101-.43.18-.86.61-.96 4.91-1.12 9.122-.641 12.512 1.43.38.241.5.721.261 1.136zm1.47-3.27c-.3.461-.93.6-1.39.3-3.461-2.13-8.732-2.750-12.821-1.51-.521.15-1.061-.15-1.211-.671-.15-.521.15-1.061.671-1.211 4.68-1.42 10.5-.73 14.49 1.72.461.3.6.93.261 1.372zm.13-3.41C15.24 8.4 8.820 8.19 5.16 9.301c-.621.18-1.271-.18-1.450-.8-.181-.62.18-1.271.8-1.45 4.23-1.28 11.26-1.03 15.69 1.75.54.33.71 1.03.38 1.57-.33.541-1.03.71-1.57.38z"/>
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <path d="M6 6l12 12M18 6L6 18" />
     </svg>
   );
 }
@@ -725,6 +859,19 @@ const s = {
   }),
   epArt: { width: 64, height: 64, borderRadius: 8, objectFit: 'cover', flexShrink: 0, background: 'var(--color-border)' },
   epBody: { flex: 1, minWidth: 0 },
+  trackRow: {
+    display: 'flex', alignItems: 'stretch', background: 'var(--color-surface)',
+    border: '1px solid var(--color-border)', borderLeft: '4px solid var(--color-accent)', borderRadius: 10,
+  },
+  trackMain: {
+    display: 'flex', alignItems: 'center', gap: 14, flex: 1, minWidth: 0, textAlign: 'left',
+    background: 'none', border: 'none', padding: '12px 4px 12px 12px',
+    cursor: 'pointer', fontFamily: 'var(--font-body)', color: 'var(--color-text)',
+  },
+  dismissBtn: {
+    background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)',
+    padding: '0 14px 0 10px', display: 'flex', alignItems: 'center', flexShrink: 0,
+  },
   trackArt: { width: 56, height: 56, borderRadius: 6, objectFit: 'cover', flexShrink: 0, background: 'var(--color-border)' },
   trackTitle: { fontSize: 15, fontWeight: 600, lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   trackArtist: { fontSize: 13, color: 'var(--color-text)', margin: '1px 0 3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
