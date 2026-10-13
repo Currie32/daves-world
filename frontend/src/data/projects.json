@@ -78,5 +78,13 @@
     "emoji": "🏠",
     "route": "/mortgage-calculator",
     "comingSoon": false
+  },
+  {
+    "id": "better-spotify",
+    "title": "Better Spotify",
+    "description": "New podcast episodes from the shows you follow.",
+    "emoji": "🎧",
+    "route": "/better-spotify",
+    "comingSoon": false
   }
 ]

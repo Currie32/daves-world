@@ -28,7 +28,7 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-        globIgnores: ['**/recipes.json'],
+        globIgnores: ['**/recipes.json', '**/embedWorker-*.js'],
         // The app ships as one unsplit bundle (no route-level code splitting
         // yet), so it exceeds Workbox's default 2 MiB precache cap.
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,

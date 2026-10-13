@@ -1,94 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-
-// ─── Spotify PKCE helpers ────────────────────────────────────────────────────
-
-const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || '';
-const REDIRECT_URI = `${window.location.origin}/playlist-generator`;
-const SCOPES = 'streaming user-read-email playlist-modify-public playlist-modify-private';
-
-function randomBytes(len) {
-  return crypto.getRandomValues(new Uint8Array(len));
-}
-function base64url(buf) {
-  return btoa(String.fromCharCode(...buf)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-async function sha256(plain) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(plain));
-  return new Uint8Array(digest);
-}
-async function startPKCE() {
-  const verifier = base64url(randomBytes(32));
-  const challenge = base64url(await sha256(verifier));
-  sessionStorage.setItem('pkce_verifier', verifier);
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI,
-    scope: SCOPES, code_challenge_method: 'S256', code_challenge: challenge,
-    show_dialog: 'true',
-  });
-  window.location.href = `https://accounts.spotify.com/authorize?${params}`;
-}
-async function exchangeCode(code) {
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code', code,
-      redirect_uri: REDIRECT_URI, client_id: CLIENT_ID,
-      code_verifier: sessionStorage.getItem('pkce_verifier'),
-    }),
-  });
-  if (!res.ok) throw new Error('Token exchange failed');
-  return res.json();
-}
-async function doRefresh(refresh) {
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: CLIENT_ID }),
-  });
-  if (!res.ok) throw new Error('Refresh failed');
-  const data = await res.json();
-  return data;
-}
-function saveTokens({ access_token, refresh_token, expires_in }) {
-  localStorage.setItem('sp_access', access_token);
-  if (refresh_token) localStorage.setItem('sp_refresh', refresh_token);
-  localStorage.setItem('sp_exp', String(Date.now() + expires_in * 1000 - 60_000));
-  localStorage.setItem('sp_scopes', SCOPES);
-}
-async function getToken() {
-  // Force re-auth if scopes have changed
-  const storedScopes = localStorage.getItem('sp_scopes');
-  if (storedScopes && storedScopes !== SCOPES) {
-    clearTokens();
-    return null;
-  }
-  const access = localStorage.getItem('sp_access');
-  const exp = Number(localStorage.getItem('sp_exp') || 0);
-  if (access && Date.now() < exp) return access;
-  const refresh = localStorage.getItem('sp_refresh');
-  if (!refresh) return null;
-  const data = await doRefresh(refresh);
-  saveTokens(data);
-  return data.access_token;
-}
-function clearTokens() {
-  ['sp_access', 'sp_refresh', 'sp_exp', 'sp_scopes'].forEach(k => localStorage.removeItem(k));
-  sessionStorage.removeItem('pkce_verifier');
-}
+import { CLIENT_ID, startAuth, completeAuth, clearTokens, spGet } from '../lib/spotify';
 
 // ─── Spotify API ─────────────────────────────────────────────────────────────
-
-async function spGet(path, token) {
-  const res = await fetch(`https://api.spotify.com/v1${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.error?.message || res.statusText);
-  }
-  return res.json();
-}
 
 async function searchArtists(q, token) {
   if (!q.trim()) return [];
@@ -875,18 +788,9 @@ export default function PlaylistGenerator() {
 
   useEffect(() => {
     async function init() {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
-      if (code) {
-        window.history.replaceState({}, '', window.location.pathname);
-        try {
-          const d = await exchangeCode(code);
-          saveTokens(d);
-          sessionStorage.removeItem('pkce_verifier');
-        }
-        catch { setAuthError('Could not connect to Spotify. Please try again.'); return; }
-      }
-      const t = await getToken();
+      let t;
+      try { t = await completeAuth(); }
+      catch { setAuthError('Could not connect to Spotify. Please try again.'); return; }
       if (!t) return;
       setToken(t);
       try {
@@ -949,7 +853,7 @@ export default function PlaylistGenerator() {
         </div>
         <div style={s.connectWrap}>
           {authError && <div style={s.error}>{authError}</div>}
-          <button style={s.connectBtn} onClick={startPKCE}><SpotifyIcon /> Connect with Spotify</button>
+          <button style={s.connectBtn} onClick={() => startAuth('/playlist-generator')}><SpotifyIcon /> Connect with Spotify</button>
         </div>
       </div>
     );

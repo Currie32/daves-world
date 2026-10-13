@@ -10,6 +10,7 @@ import BookFinder from './pages/BookFinder';
 import SP500PE from './pages/SP500PE';
 import Events from './pages/Events';
 import MortgageCalculator from './pages/MortgageCalculator';
+import BetterSpotify from './pages/BetterSpotify';
 import Layout from './components/Layout';
 import UpdatePrompt from './components/UpdatePrompt';
 
@@ -30,6 +31,7 @@ export default function App() {
           <Route path="/sp500-pe" element={<SP500PE />} />
           <Route path="/events" element={<Events />} />
           <Route path="/mortgage-calculator" element={<MortgageCalculator />} />
+          <Route path="/better-spotify" element={<BetterSpotify />} />
         </Routes>
       </Layout>
     </BrowserRouter>

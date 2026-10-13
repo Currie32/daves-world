@@ -1,0 +1,638 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { startAuth, completeAuth, getToken, clearTokens, spGet } from '../lib/spotify';
+
+// Better Spotify uses its own Spotify app (separate redirect URIs from Playlist Generator).
+const CLIENT_ID = import.meta.env.VITE_SPOTIFY_BETTER_CLIENT_ID || '';
+
+const RECENT_DAYS = 14;
+const LISTENED_DAYS = 30;
+const LISTENED_MIN_MS = 20 * 60_000;
+const CACHE_KEY = 'bs_podcasts_v3';
+const CACHE_TTL = 10 * 60_000;
+const RECS_KEY = 'bs_recs_v7';
+const RECS_TTL = 72 * 3600_000;
+const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+// ─── Data loading ────────────────────────────────────────────────────────────
+
+async function getFollowedShows(token) {
+  const shows = [];
+  let path = '/me/shows?limit=50';
+  while (path) {
+    const data = await spGet(path, token);
+    shows.push(...(data.items || []).map(i => i.show).filter(Boolean));
+    path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
+  }
+  return shows;
+}
+
+// Run `fn` over items with bounded concurrency to stay under Spotify's rate limit.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try { out[i] = await fn(items[i]); } catch { out[i] = null; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// Release dates are 'YYYY', 'YYYY-MM' or 'YYYY-MM-DD'; parse as local midnight.
+function parseRelease(d) {
+  const [y, m = 1, day = 1] = (d || '').split('-').map(Number);
+  return y ? new Date(y, m - 1, day) : new Date(0);
+}
+
+async function loadPodcasts(token) {
+  const shows = await getFollowedShows(token);
+  const episodeLists = await mapLimit(shows, 5, show =>
+    spGet(`/shows/${show.id}/episodes?limit=20`, token).then(d => (d.items || []).filter(Boolean)),
+  );
+  const cutoff = Date.now() - RECENT_DAYS * 86_400_000;
+  // Spotify exposes no podcast listening history, so "listened in the past
+  // month" = episodes released in that window that were finished or started.
+  const listenedCutoff = Date.now() - LISTENED_DAYS * 86_400_000;
+  const recent = [];
+  const listened = [];
+  const showRows = shows.map((show, i) => {
+    const eps = (episodeLists[i] || [])
+      .map(ep => ({ ...ep, _date: parseRelease(ep.release_date).getTime() }))
+      .sort((a, b) => b._date - a._date);
+    eps.filter(ep => ep._date >= cutoff).forEach(ep => recent.push({ ...ep, _show: show }));
+    eps.filter(ep => ep._date >= listenedCutoff && (ep.resume_point?.fully_played || ep.resume_point?.resume_position_ms >= LISTENED_MIN_MS))
+      .forEach(ep => listened.push({ ...ep, _show: show }));
+    return { ...show, _latest: eps[0] || null };
+  });
+  recent.sort((a, b) => b._date - a._date);
+  showRows.sort((a, b) => (b._latest?._date || 0) - (a._latest?._date || 0));
+  return { recent, listened, shows: showRows };
+}
+
+// ─── Playback ────────────────────────────────────────────────────────────────
+
+function pickDevice(devices) {
+  if (!devices.length) return null;
+  return devices.find(d => d.is_active)
+    || devices.find(d => d.type === (IS_MOBILE ? 'Smartphone' : 'Computer'))
+    || devices[0];
+}
+
+async function playOn(token, ep, deviceId) {
+  const resume = ep.resume_point;
+  const body = { uris: [ep.uri] };
+  if (resume && !resume.fully_played && resume.resume_position_ms > 0) {
+    body.position_ms = resume.resume_position_ms;
+  }
+  const qs = deviceId ? `?device_id=${deviceId}` : '';
+  const res = await fetch(`https://api.spotify.com/v1/me/player/play${qs}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.status;
+}
+
+async function getDevices(token) {
+  try { return (await spGet('/me/player/devices', token)).devices || []; }
+  catch { return []; }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Start the episode in the Spotify app. If no Spotify app is running, open it
+// via deep link and wait for it to register as a device, then start playback.
+async function playEpisode(ep, onStatus) {
+  const token = await getToken(CLIENT_ID);
+  if (!token) return onStatus({ kind: 'error', text: 'Spotify session expired — reconnect.' });
+
+  let device = pickDevice(await getDevices(token));
+  if (device) {
+    const status = await playOn(token, ep, device.id);
+    if (status < 300) return onStatus({ kind: 'ok', text: `Playing on ${device.name}` });
+    if (status === 403) {
+      window.location.href = ep.uri;
+      return onStatus({ kind: 'info', text: 'Opened in Spotify (remote playback needs Premium).' });
+    }
+  }
+
+  onStatus({ kind: 'info', text: 'Opening Spotify…' });
+  window.location.href = ep.uri;
+  for (let i = 0; i < 15; i++) {
+    await sleep(1500);
+    device = pickDevice(await getDevices(token));
+    if (device) {
+      const status = await playOn(token, ep, device.id);
+      if (status < 300) return onStatus({ kind: 'ok', text: `Playing on ${device.name}` });
+    }
+  }
+  onStatus({ kind: 'info', text: 'Opened in Spotify — tap play if it didn’t start.' });
+}
+
+// ─── Formatting ──────────────────────────────────────────────────────────────
+
+function relativeDate(ts) {
+  if (!ts) return '—';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((today.getTime() - ts) / 86_400_000);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 30) return `${Math.floor(days / 7)} wk${days >= 14 ? 's' : ''} ago`;
+  const d = new Date(ts);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+function duration(ms) {
+  const mins = Math.round(ms / 60_000);
+  return mins >= 60 ? `${Math.floor(mins / 60)} hr ${mins % 60} min` : `${mins} min`;
+}
+
+function imageUrl(images, minWidth = 64) {
+  if (!images?.length) return null;
+  const sorted = [...images].sort((a, b) => (a.width || 0) - (b.width || 0));
+  return (sorted.find(i => (i.width || 0) >= minWidth) || sorted[sorted.length - 1]).url;
+}
+
+// ─── Components ──────────────────────────────────────────────────────────────
+
+function EpisodeRow({ ep, onPlay }) {
+  const resume = ep.resume_point;
+  const played = resume?.fully_played;
+  const progress = !played && resume?.resume_position_ms > 0 ? resume.resume_position_ms / ep.duration_ms : 0;
+  const remaining = progress ? ep.duration_ms - resume.resume_position_ms : 0;
+  return (
+    <button style={s.episode(played)} onClick={() => onPlay(ep)} title="Play in Spotify">
+      <img src={imageUrl(ep.images) || imageUrl(ep._show.images)} alt="" style={s.epArt} />
+      <div style={s.epBody}>
+        <div style={s.epShow}>{ep._show.name}</div>
+        <div style={s.epTitle}>{ep.name}</div>
+        <div style={s.epMeta}>
+          <span>{relativeDate(ep._date)}</span>
+          <span>·</span>
+          <span>{progress ? `${duration(remaining)} left` : duration(ep.duration_ms)}</span>
+          {played && <span style={s.playedBadge}>Played</span>}
+        </div>
+        {progress > 0 && (
+          <div style={s.progressTrack}><div style={{ ...s.progressFill, width: `${Math.min(100, progress * 100)}%` }} /></div>
+        )}
+      </div>
+      <span style={s.playIcon}><PlayIcon /></span>
+    </button>
+  );
+}
+
+function ShowRow({ show, onPlay }) {
+  const latest = show._latest;
+  return (
+    <div style={s.showRow}>
+      <a href={show.external_urls?.spotify || `https://open.spotify.com/show/${show.id}`}
+        target="_blank" rel="noopener noreferrer" style={s.showLink}>
+        <img src={imageUrl(show.images)} alt="" style={s.showArt} />
+        <div style={{ minWidth: 0 }}>
+          <div style={s.showName}>{show.name}</div>
+          {show.publisher && <div style={s.showPublisher}>{show.publisher}</div>}
+        </div>
+      </a>
+      {latest ? (
+        <button style={s.latestBtn} onClick={() => onPlay({ ...latest, _show: show })} title={`Play: ${latest.name}`}>
+          <span style={s.latestDate}>{relativeDate(latest._date)}</span>
+          <span style={s.latestName}>{latest.name}</span>
+        </button>
+      ) : (
+        <span style={s.latestDate}>No episodes</span>
+      )}
+    </div>
+  );
+}
+
+// Survives sub-tab switches so a running computation isn't started twice.
+let recsInFlight = null;
+
+function readRecsCache(listenedKey) {
+  try {
+    const c = JSON.parse(localStorage.getItem(RECS_KEY) || 'null');
+    if (c && c.key === listenedKey && Date.now() - c.at < RECS_TTL && c.result?.sections?.length) return c.result;
+  } catch { /* ignore */ }
+  return null;
+}
+
+function RecommendedView({ token, data, onPlay }) {
+  const listenedKey = data.listened.map(e => e.id).sort().join(',');
+  const [result, setResult] = useState(() => readRecsCache(listenedKey));
+  const sections = result?.sections;
+  const [progress, setProgress] = useState('');
+  const [error, setError] = useState('');
+
+  const run = useCallback(async () => {
+    setError(''); setResult(null); setProgress('Loading recommendation model…');
+    try {
+      if (!recsInFlight) {
+        recsInFlight = (async () => {
+          const [{ recommendEpisodes }, { onModelProgress }] = await Promise.all([
+            import('../lib/podcastRecs'), import('../lib/embeddings'),
+          ]);
+          onModelProgress(p => p.total && setProgress(`Downloading model (first time only)… ${Math.round(100 * p.loaded / p.total)}%`));
+          const out = await recommendEpisodes({
+            token, listened: data.listened, followedShows: data.shows, onProgress: setProgress,
+          });
+          try { localStorage.setItem(RECS_KEY, JSON.stringify({ key: listenedKey, at: Date.now(), result: out })); } catch { /* quota */ }
+          return out;
+        })().finally(() => { recsInFlight = null; });
+      }
+      setResult(await recsInFlight);
+    } catch (e) {
+      setError(e.message || 'Could not build recommendations.');
+    } finally {
+      setProgress('');
+    }
+  }, [token, data, listenedKey]);
+
+  useEffect(() => {
+    if (!sections && data.listened.length) run();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listenedKey]);
+
+  const header = (
+    <div style={s.recsHead}>
+      <p style={{ ...s.sectionSub, margin: 0 }}>
+        Episodes from shows you don’t follow, matched to the guests and topics of episodes you played recently.
+      </p>
+    </div>
+  );
+
+  if (!data.listened.length) {
+    return <div style={s.muted}>No listening found in the last {LISTENED_DAYS} days. Play a few episodes from shows you follow, then refresh.</div>;
+  }
+  if (error) return <>{header}<div style={s.error}>{error} <button style={s.linkBtn} onClick={run}>Retry</button></div></>;
+  if (!sections) return <>{header}<div style={s.muted}>{progress || 'Working…'}</div></>;
+  return (
+    <>
+      {header}
+      {sections.length === 0 ? (
+        <div style={s.muted}>
+          Couldn’t find similar episodes this time.
+          <DebugSummary debug={result.debug} />
+        </div>
+      ) : (
+        sections.map(({ source, recs }) => (
+          <section key={source.id} style={s.recSection}>
+            <div style={s.recSectionHead}>
+              <span style={s.recSectionLabel}>Because you listened to</span>
+              <span style={s.recSectionTitle}>{source.name}</span>
+              <span style={s.recSectionShow}>{source.show}</span>
+            </div>
+            <div style={s.list}>
+              {recs.map(ep => <EpisodeRow key={ep.id} ep={ep} onPlay={onPlay} />)}
+            </div>
+          </section>
+        ))
+      )}
+    </>
+  );
+}
+
+function DebugSummary({ debug }) {
+  if (!debug) return null;
+  const rows = [
+    ['Listened episodes (last 30 days)', debug.listenedEpisodes],
+    ['Source episodes', debug.sources],
+    ['Searches', debug.queries ? `${debug.queries.length}: ${debug.queries.join(', ')}` : undefined],
+    ['Episodes returned by search', debug.searchResults],
+    ['New episodes after filtering', debug.candidates],
+    ['Close enough matches', debug.aboveThreshold],
+    ['Recommended (unfollowed shows)', debug.recommended],
+    ['Spotify errors', debug.errors?.length ? debug.errors.join(' | ') : undefined],
+  ].filter(([, v]) => v !== undefined);
+  return (
+    <dl style={s.debug}>
+      {rows.map(([k, v]) => <div key={k} style={{ display: 'flex', gap: 8 }}><dt style={{ fontWeight: 600 }}>{k}:</dt><dd style={{ margin: 0 }}>{v}</dd></div>)}
+    </dl>
+  );
+}
+
+function PodcastsTab({ token }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState(null);
+  const [view, setView] = useState('latest');
+  const [recsNonce, setRecsNonce] = useState(0);
+  const statusTimer = useRef(null);
+
+  const load = useCallback(async (force = false) => {
+    if (!force) {
+      try {
+        const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || 'null');
+        if (cached && Date.now() - cached.at < CACHE_TTL) { setData(cached.data); return; }
+      } catch { /* ignore bad cache */ }
+    }
+    setLoading(true); setError('');
+    try {
+      const fresh = await loadPodcasts(token);
+      setData(fresh);
+      try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), data: fresh })); } catch { /* quota */ }
+    } catch (e) {
+      setError(e.message || 'Could not load podcasts.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const onStatus = useCallback(st => {
+    setStatus(st);
+    clearTimeout(statusTimer.current);
+    if (st.kind !== 'info' || !st.text.endsWith('…')) {
+      statusTimer.current = setTimeout(() => setStatus(null), 5000);
+    }
+  }, []);
+
+  const onPlay = useCallback(ep => { playEpisode(ep, onStatus); }, [onStatus]);
+
+  // On the Recommended tab, Refresh also discards saved recommendations and reruns them.
+  const refresh = async () => {
+    await load(true);
+    if (view === 'recs') {
+      try { localStorage.removeItem(RECS_KEY); } catch { /* ignore */ }
+      setRecsNonce(n => n + 1);
+    }
+  };
+
+  if (error) return <div style={s.error}>{error} <button style={s.linkBtn} onClick={() => load(true)}>Retry</button></div>;
+  if (!data) return <div style={s.muted}>Loading your podcasts…</div>;
+
+  return (
+    <>
+      <div style={s.subTabBar}>
+        <div style={s.subTabs} role="tablist">
+          {[['latest', 'Latest episodes', data.recent.length], ['shows', 'Shows', data.shows.length], ['recs', 'Recommended']].map(([id, label, n]) => (
+            <button key={id} role="tab" aria-selected={view === id} style={s.subTab(view === id)} onClick={() => setView(id)}>
+              {label}{n !== undefined && <span style={s.subTabCount(view === id)}> {n}</span>}
+            </button>
+          ))}
+        </div>
+        <button style={s.linkBtn} onClick={refresh} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
+      </div>
+
+      {view === 'recs' ? (
+        <RecommendedView key={recsNonce} token={token} data={data} onPlay={onPlay} />
+      ) : view === 'latest' ? (
+        <>
+          <p style={s.sectionSub}>From shows you follow, released in the last {RECENT_DAYS} days.</p>
+          {data.recent.length === 0 ? (
+            <div style={s.muted}>No new episodes in the last {RECENT_DAYS} days.</div>
+          ) : (
+            <div style={s.list}>
+              {data.recent.map(ep => <EpisodeRow key={ep.id} ep={ep} onPlay={onPlay} />)}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <p style={s.sectionSub}>Ordered by most recent episode.</p>
+          {data.shows.length === 0 ? (
+            <div style={s.muted}>You don’t follow any podcasts yet.</div>
+          ) : (
+            <div style={s.showList}>
+              {data.shows.map(show => <ShowRow key={show.id} show={show} onPlay={onPlay} />)}
+            </div>
+          )}
+        </>
+      )}
+
+      {status && <div style={s.toast(status.kind)}>{status.text}</div>}
+    </>
+  );
+}
+
+// ─── Page ────────────────────────────────────────────────────────────────────
+
+export default function BetterSpotify() {
+  const [token, setToken] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState('');
+  const [ready, setReady] = useState(false);
+  const [tab, setTab] = useState('podcasts');
+
+  useEffect(() => {
+    (async () => {
+      let t;
+      try { t = await completeAuth(CLIENT_ID); }
+      catch { setAuthError('Could not connect to Spotify. Please try again.'); setReady(true); return; }
+      if (t) {
+        try { setUser(await spGet('/me', t)); setToken(t); }
+        catch (e) {
+          clearTokens(CLIENT_ID);
+          setAuthError(e.status === 403
+            ? `Spotify refused access (403: ${e.message}). This Spotify app is in Development Mode — the account must be added under User Management in the Spotify dashboard.`
+            : `Spotify error${e.status ? ` (${e.status})` : ''}: ${e.message}`);
+        }
+      }
+      setReady(true);
+    })();
+  }, []);
+
+  const header = (
+    <div style={s.header}>
+      <h1 style={s.title}>Better Spotify</h1>
+      <p style={s.subtitle}>Your podcasts and music, sorted the way Spotify won’t.</p>
+    </div>
+  );
+
+  if (!CLIENT_ID) {
+    return (
+      <div style={s.page}>
+        {header}
+        <div style={s.error}><strong>Setup required:</strong> Add <code>VITE_SPOTIFY_BETTER_CLIENT_ID</code> to <code>.env.local</code>.</div>
+      </div>
+    );
+  }
+
+  if (!token) {
+    return (
+      <div style={s.page}>
+        {header}
+        {ready && (
+          <div style={s.connectWrap}>
+            {authError && <div style={s.error}>{authError}</div>}
+            <button style={s.connectBtn} onClick={() => startAuth('/better-spotify', CLIENT_ID)}><SpotifyIcon /> Connect with Spotify</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={s.page}>
+      {header}
+
+      {user && (
+        <div style={s.userBar}>
+          {user.images?.[0]?.url && <img src={user.images[0].url} alt="" style={s.avatar} />}
+          <span style={s.userName}>{user.display_name}</span>
+          <button style={s.disconnectBtn} onClick={() => {
+            clearTokens(CLIENT_ID); sessionStorage.removeItem(CACHE_KEY); setToken(null); setUser(null);
+          }}>Disconnect</button>
+        </div>
+      )}
+
+      <div style={s.tabs} role="tablist">
+        {[['podcasts', 'Podcasts'], ['music', 'Music']].map(([id, label]) => (
+          <button key={id} role="tab" aria-selected={tab === id} style={s.tab(tab === id)} onClick={() => setTab(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'podcasts' ? <PodcastsTab token={token} /> : (
+        <div style={s.placeholder}>Music tools coming soon.</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
+
+function SpotifyIcon({ size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.371-.721.49-1.101.241-3.021-1.858-6.832-2.278-11.322-1.237-.43.101-.86-.18-.96-.61-.101-.43.18-.86.61-.96 4.91-1.12 9.122-.641 12.512 1.43.38.241.5.721.261 1.136zm1.47-3.27c-.3.461-.93.6-1.39.3-3.461-2.13-8.732-2.750-12.821-1.51-.521.15-1.061-.15-1.211-.671-.15-.521.15-1.061.671-1.211 4.68-1.42 10.5-.73 14.49 1.72.461.3.6.93.261 1.372zm.13-3.41C15.24 8.4 8.820 8.19 5.16 9.301c-.621.18-1.271-.18-1.450-.8-.181-.62.18-1.271.8-1.45 4.23-1.28 11.26-1.03 15.69 1.75.54.33.71 1.03.38 1.57-.33.541-1.03.71-1.57.38z"/>
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+  );
+}
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
+const s = {
+  page: { maxWidth: 760, margin: '0 auto', padding: '56px 20px 96px', fontFamily: 'var(--font-body)' },
+  header: { marginBottom: 40, textAlign: 'center' },
+  title: {
+    fontFamily: 'var(--font-display)', fontSize: 42, fontWeight: 700,
+    margin: '0 0 6px', color: 'var(--color-text)', letterSpacing: '-0.01em',
+  },
+  subtitle: { color: 'var(--color-text-muted)', margin: 0, fontSize: 16, lineHeight: 1.5 },
+  connectWrap: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, marginTop: 40 },
+  connectBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 10,
+    background: '#1DB954', color: '#fff', border: 'none', borderRadius: 28,
+    padding: '14px 32px', fontSize: 15, fontWeight: 600, cursor: 'pointer',
+    boxShadow: '0 2px 8px rgba(29,185,84,0.3)',
+  },
+  error: {
+    background: '#fdf0ec', border: '1px solid #f0c8b8', color: '#8a3b1a',
+    borderRadius: 10, padding: '12px 16px', fontSize: 14,
+  },
+  userBar: {
+    display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28,
+    padding: '10px 16px', background: 'var(--color-surface)',
+    border: '1px solid var(--color-border)', borderRadius: 100,
+  },
+  avatar: { width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' },
+  userName: { flex: 1, fontWeight: 500, fontSize: 13, color: 'var(--color-text-muted)' },
+  disconnectBtn: {
+    background: 'none', border: 'none', padding: '4px 10px', fontSize: 12,
+    color: 'var(--color-text-muted)', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 2,
+  },
+  tabs: { display: 'flex', gap: 4, borderBottom: '1px solid var(--color-border)', marginBottom: 32 },
+  tab: active => ({
+    background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)',
+    padding: '10px 18px', fontSize: 15, fontWeight: active ? 600 : 500,
+    color: active ? 'var(--color-text)' : 'var(--color-text-muted)',
+    borderBottom: `2px solid ${active ? 'var(--color-accent)' : 'transparent'}`, marginBottom: -1,
+  }),
+  placeholder: {
+    textAlign: 'center', padding: '64px 20px', color: 'var(--color-text-muted)',
+    border: '1px dashed var(--color-border)', borderRadius: 12, fontSize: 15,
+  },
+  subTabBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' },
+  subTabs: { display: 'inline-flex', gap: 4, padding: 4, background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 100 },
+  subTab: active => ({
+    border: 'none', cursor: 'pointer', fontFamily: 'var(--font-body)', borderRadius: 100,
+    padding: '7px 16px', fontSize: 14, fontWeight: 600,
+    background: active ? 'var(--color-accent)' : 'transparent',
+    color: active ? '#fff' : 'var(--color-text-muted)',
+  }),
+  debug: { fontSize: 12, marginTop: 12, display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'ui-monospace, monospace' },
+  recsHead: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, margin: '4px 0 16px' },
+  recSection: { marginBottom: 36 },
+  recSectionHead: { display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 12 },
+  recSectionLabel: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--color-text-muted)' },
+  recSectionTitle: { fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 700, color: 'var(--color-text)', lineHeight: 1.25 },
+  recSectionShow: { fontSize: 13, color: 'var(--color-accent)', fontWeight: 500 },
+  subTabCount: active => ({ fontWeight: 500, opacity: active ? 0.85 : 0.7 }),
+  sectionSub: { color: 'var(--color-text-muted)', fontSize: 13, margin: '4px 0 16px' },
+  muted: { color: 'var(--color-text-muted)', fontSize: 14, padding: '16px 0' },
+  linkBtn: {
+    background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer',
+    fontSize: 13, fontWeight: 500, padding: 0,
+  },
+  list: { display: 'flex', flexDirection: 'column', gap: 10 },
+  episode: played => ({
+    display: 'flex', alignItems: 'center', gap: 14, width: '100%', textAlign: 'left',
+    background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+    borderLeft: '4px solid var(--color-accent)', borderRadius: 10, padding: 12,
+    cursor: 'pointer', fontFamily: 'var(--font-body)', color: 'var(--color-text)',
+    opacity: played ? 0.6 : 1,
+  }),
+  epArt: { width: 64, height: 64, borderRadius: 8, objectFit: 'cover', flexShrink: 0, background: 'var(--color-border)' },
+  epBody: { flex: 1, minWidth: 0 },
+  epShow: {
+    fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
+    color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  epTitle: {
+    fontSize: 15, fontWeight: 600, lineHeight: 1.3, margin: '2px 0 4px',
+    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+  },
+  epMeta: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--color-text-muted)', flexWrap: 'wrap' },
+  playedBadge: {
+    marginLeft: 4, fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em',
+    padding: '1px 6px', borderRadius: 4, background: 'var(--color-border)',
+  },
+  progressTrack: { height: 3, background: 'var(--color-border)', borderRadius: 2, marginTop: 6, maxWidth: 220 },
+  progressFill: { height: '100%', background: 'var(--color-accent)', borderRadius: 2 },
+  playIcon: {
+    width: 34, height: 34, borderRadius: '50%', background: '#1DB954', color: '#fff', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+  },
+  showList: {
+    background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 12, overflow: 'hidden',
+  },
+  showRow: {
+    display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+    borderBottom: '1px solid var(--color-border)', flexWrap: 'wrap',
+  },
+  showLink: {
+    display: 'flex', alignItems: 'center', gap: 12, flex: '1 1 220px', minWidth: 0,
+    textDecoration: 'none', color: 'var(--color-text)',
+  },
+  showArt: { width: 44, height: 44, borderRadius: 6, objectFit: 'cover', flexShrink: 0, background: 'var(--color-border)' },
+  showName: { fontWeight: 600, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  showPublisher: { fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  latestBtn: {
+    display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flex: '0 1 240px', minWidth: 0,
+    background: 'none', border: 'none', cursor: 'pointer', textAlign: 'right', padding: 0, fontFamily: 'var(--font-body)',
+  },
+  latestDate: { fontSize: 12, fontWeight: 600, color: 'var(--color-accent)' },
+  latestName: {
+    fontSize: 12, color: 'var(--color-text-muted)', maxWidth: '100%',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  toast: kind => ({
+    position: 'fixed', left: '50%', transform: 'translateX(-50%)',
+    bottom: 'calc(24px + env(safe-area-inset-bottom, 0px))', zIndex: 1000,
+    background: kind === 'error' ? '#8a3b1a' : '#1a1a1a', color: '#fff',
+    padding: '10px 18px', borderRadius: 100, fontSize: 13, boxShadow: '0 6px 20px rgba(0,0,0,0.2)',
+    maxWidth: 'calc(100vw - 32px)',
+  }),
+};
