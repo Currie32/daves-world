@@ -172,6 +172,7 @@ export async function spGet(path, token) {
         e.status = res.status;
         throw e;
       }
+      if (res.status === 204) return null; // e.g. currently-playing when nothing is
       return res.json();
     }
   } finally {

@@ -33,7 +33,7 @@ firestore.rules      # Firestore security rules
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
 | `/events` | Events.jsx | Metro Vancouver events browser: search, map, calendar |
 | `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
-| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded) |
+| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: continue listening, latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded); in-page player (`lib/useSpotifyWebPlayer.js`) |
 
 ## Design System
 
@@ -56,7 +56,7 @@ firestore.rules      # Firestore security rules
 ## External Services
 
 - **Firebase**: Firestore (recommendations, website_recipes), Hosting, Cloud Functions
-- **Spotify**: PKCE OAuth (shared in `lib/spotify.js`; tokens stored per client ID; each page's URL must be a registered redirect URI on its Spotify app), Web API (search, artists, `/me/shows`, `/shows/{id}/episodes`, player), Web Playback SDK (requires Premium)
+- **Spotify**: PKCE OAuth (shared in `lib/spotify.js`; tokens stored per client ID; each page's URL must be a registered redirect URI on its Spotify app), Web API (search, artists, `/me/shows`, `/shows/{id}/episodes`, player), Web Playback SDK (requires Premium; not on iOS), iFrame embed API (Better Spotify fallback player)
 - **Google Places API**: Address autocomplete in Recommendations
 - **Open-Meteo**: Ensemble weather forecast API (no auth needed)
 - **Leaflet/OpenStreetMap**: Map display in Recommendations
