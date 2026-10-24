@@ -39,6 +39,24 @@ const styles = {
     cursor: 'pointer',
     transition: 'color 0.15s',
   }),
+  // Mobile: the four tabs as a 2×2 grid of pills (an underlined row wraps awkwardly).
+  tabsMobile: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '0.4rem',
+    marginBottom: '1.5rem',
+  },
+  tabMobile: (active) => ({
+    padding: '0.55rem 0.5rem',
+    background: active ? 'var(--color-accent)' : 'var(--color-surface)',
+    border: `1px solid ${active ? 'var(--color-accent)' : 'var(--color-border)'}`,
+    borderRadius: '100px',
+    fontFamily: 'var(--font-body)',
+    fontSize: '0.9rem',
+    fontWeight: active ? 600 : 500,
+    color: active ? '#fff' : 'var(--color-text)',
+    cursor: 'pointer',
+  }),
   grid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
@@ -1812,6 +1830,7 @@ function RecommendationsTab({ allRecipes, userPrefs, savePrefs, loadingPrefs, us
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Cookbooks() {
+  const isMobile = useIsMobile();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState('cookbooks');
@@ -1862,31 +1881,21 @@ export default function Cookbooks() {
         subtitle="Browse my cookbook collection and recipes saved from the web."
       />
 
-      <div style={styles.tabs}>
-        <button
-          style={styles.tab(activeTab === 'cookbooks')}
-          onClick={() => { setActiveTab('cookbooks'); clearBook(); }}
-        >
-          My Cookbooks
-        </button>
-        <button
-          style={styles.tab(activeTab === 'web')}
-          onClick={() => setActiveTab('web')}
-        >
-          Saved from Web
-        </button>
-        <button
-          style={styles.tab(activeTab === 'weeknight')}
-          onClick={() => { setActiveTab('weeknight'); clearBook(); }}
-        >
-          Weeknight Dinners
-        </button>
-        <button
-          style={styles.tab(activeTab === 'recommendations')}
-          onClick={() => setActiveTab('recommendations')}
-        >
-          Recommendations
-        </button>
+      <div style={isMobile ? styles.tabsMobile : styles.tabs}>
+        {[
+          ['cookbooks', 'My Cookbooks', clearBook],
+          ['web', 'Saved from Web'],
+          ['weeknight', 'Weeknight Dinners', clearBook],
+          ['recommendations', 'Recommendations'],
+        ].map(([id, label, onLeave]) => (
+          <button
+            key={id}
+            style={isMobile ? styles.tabMobile(activeTab === id) : styles.tab(activeTab === id)}
+            onClick={() => { setActiveTab(id); onLeave?.(); }}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {activeTab === 'cookbooks' && (
