@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Home from './pages/Home';
 import Cookbooks from './pages/Cookbooks';
-import PlaylistGenerator from './pages/PlaylistGenerator';
 import Recommendations from './pages/Recommendations';
 import WeatherForecast from './pages/WeatherForecast';
 import MovieFinder from './pages/MovieFinder';
@@ -23,7 +22,7 @@ export default function App() {
           <Route path="/" element={<Home />} />
           <Route path="/recipes" element={<Cookbooks />} />
           <Route path="/cookbooks" element={<Navigate to="/recipes" replace />} />
-          <Route path="/playlist-generator" element={<PlaylistGenerator />} />
+          <Route path="/playlist-generator" element={<Navigate to="/better-spotify?tab=playlist" replace />} />
           <Route path="/recommendations" element={<Recommendations />} />
           <Route path="/weather-forecast" element={<WeatherForecast />} />
           <Route path="/movie-finder" element={<MovieFinder />} />

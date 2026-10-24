@@ -39,8 +39,10 @@ const MONTH_LABELS = ['January', 'February', 'March', 'April', 'May', 'June', 'J
 
 // ─── Date helpers ──────────────────────────────────────────────────────────────
 
+// Local date (toISOString is UTC, which is already tomorrow on a Vancouver evening).
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function daysUntil(dateStr) {
@@ -342,19 +344,22 @@ export default function Events() {
     return [...items].sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
   }, [events, fuse, query, activeTags, activeCities, freeOnly, dateFrom, dateTo]);
 
-  // Group list view by date
+  // Group list view by date. Ongoing events that started earlier go under today (or the
+  // "from" date, if later) instead of their past start date.
   const grouped = useMemo(() => {
+    const floor = dateFrom > todayStr() ? dateFrom : todayStr();
     const groups = [];
     let lastDate = null;
     for (const ev of filtered) {
-      if (ev.startDate !== lastDate) {
-        groups.push({ date: ev.startDate, events: [] });
-        lastDate = ev.startDate;
+      const date = ev.startDate < floor ? floor : ev.startDate;
+      if (date !== lastDate) {
+        groups.push({ date, events: [] });
+        lastDate = date;
       }
       groups[groups.length - 1].events.push(ev);
     }
     return groups;
-  }, [filtered]);
+  }, [filtered, dateFrom]);
 
   // Markers for map
   const markers = useMemo(() => filtered.filter(e => e.location?.lat && e.location?.lng), [filtered]);

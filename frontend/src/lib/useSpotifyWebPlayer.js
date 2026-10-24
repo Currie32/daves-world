@@ -67,12 +67,16 @@ export function embedHeight(item) {
 }
 
 // getAccessToken: stable async () => token | null, called whenever a fresh token is needed.
+// play(item, queue?): with a queue (array of tracks containing item), playback carries on
+// through the rest of the queue and next()/prev() step through it.
 // onProgress(uri, positionMs, durationMs): called every few seconds while playing and on
 // pause/close/page hide, so the page can remember where you are (the embed player doesn't
 // save progress to your Spotify account, and the SDK's saves take a while to show up).
 export function useSpotifyWebPlayer(getAccessToken, onProgress) {
   const [engine, setEngine] = useState(SDK_SUPPORTED ? 'pending' : 'embed');
   const [item, setItem] = useState(null);
+  const [queue, setQueue] = useState(null);
+  const queueRef = useRef(null);
   const [state, setState] = useState(null); // sdk only: { paused, position, duration, at, uri }
   const stateRef = useRef(null);
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -148,6 +152,9 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
         if (!st) { setState(null); return; }
         const uri = st.track_window?.current_track?.uri;
         setState({ paused: st.paused, position: st.position, duration: st.duration, at: Date.now(), uri });
+        // Spotify advanced through the queue on its own: follow it.
+        const q = queueRef.current?.find(t => t.uri === uri);
+        if (q && itemRef.current?.uri !== uri) setItem(q);
         report(uri, st.position, st.duration, st.paused);
       });
       p.connect();
@@ -178,6 +185,13 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
     };
   }, [switchToEmbed, getAccessToken, report]);
 
+  // Embed only: move to the next/previous queue item (the effect below loads it).
+  const advance = useCallback(step => {
+    const q = queueRef.current;
+    const i = q ? q.findIndex(t => t.uri === itemRef.current?.uri) : -1;
+    if (i >= 0 && q[i + step]) setItem(q[i + step]);
+  }, []);
+
   // Embed engine: create the controller once its element is mounted, then load each item.
   useEffect(() => {
     if (engine !== 'embed' || !item) return;
@@ -198,6 +212,7 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
       }
       const el = document.createElement('div');
       embedElRef.current.replaceChildren(el);
+      let wasPaused = true;
       api.createController(el, { uri: item.uri, width: '100%', height }, c => {
         if (cancelled) { c.destroy?.(); return; }
         controllerRef.current = c;
@@ -212,11 +227,14 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
             if (position < to - 5000) { c.seek(to / 1000); return; }
           }
           report(e.data?.playingURI || itemRef.current?.uri, position, duration, isPaused);
+          // The embed plays one item at a time, so advance through the queue ourselves.
+          if (!wasPaused && isPaused && duration > 0 && position >= duration - 1500) advance(1);
+          wasPaused = isPaused;
         });
       });
     })();
     return () => { cancelled = true; };
-  }, [engine, item, report]);
+  }, [engine, item, report, advance]);
 
   const playSdk = useCallback(async it => {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -227,7 +245,8 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
       }
       const token = await getAccessToken();
       if (!token) { setError('Spotify session expired — reconnect.'); return; }
-      const body = { uris: [it.uri] };
+      const q = queueRef.current;
+      const body = q ? { uris: q.map(t => t.uri), offset: { uri: it.uri } } : { uris: [it.uri] };
       const pos = resumeMs(it);
       if (pos) body.position_ms = pos;
       const res = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceRef.current}`, {
@@ -245,8 +264,10 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
     switchToEmbed();
   }, [switchToEmbed, getAccessToken]);
 
-  const play = useCallback(async it => {
+  const play = useCallback(async (it, q = null) => {
     setError('');
+    queueRef.current = q;
+    setQueue(q);
     // Must run inside the click so mobile/Safari allow audio to start.
     playerRef.current?.activateElement?.();
     setItem(it);
@@ -255,7 +276,19 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
     // 'embed' is handled by the effect above once `item` renders.
   }, [playSdk]);
 
-  const togglePlay = useCallback(() => { playerRef.current?.togglePlay(); }, []);
+  const togglePlay = useCallback(() => {
+    if (engineRef.current === 'sdk') playerRef.current?.togglePlay();
+    else controllerRef.current?.togglePlay?.();
+  }, []);
+
+  // Step through the queue (no-op without one).
+  const step = useCallback(dir => {
+    const q = queueRef.current;
+    const i = q ? q.findIndex(t => t.uri === itemRef.current?.uri) : -1;
+    if (i >= 0 && q[i + dir]) play(q[i + dir], q);
+  }, [play]);
+  const next = useCallback(() => step(1), [step]);
+  const prev = useCallback(() => step(-1), [step]);
   const seek = useCallback(ms => { playerRef.current?.seek(Math.max(0, ms)); }, []);
 
   // Jump forward/back by deltaMs from the current position, on either engine.
@@ -306,8 +339,10 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress) {
     embedPos.current = null;
     setItem(null);
     setState(null);
+    queueRef.current = null;
+    setQueue(null);
     setError('');
   }, [flush]);
 
-  return { engine, item, state, error, play, togglePlay, seek, skip, close, embedElRef };
+  return { engine, item, queue, state, error, play, togglePlay, next, prev, seek, skip, close, embedElRef };
 }

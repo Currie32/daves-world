@@ -494,7 +494,11 @@ export default function MortgageCalculator() {
   const [annualRate, setAnnualRate] = useState(5.5);
   const [amortYears, setAmortYears] = useState(25);
   const [frequencyKey, setFrequencyKey] = useState('monthly');
-  const [startDateStr, setStartDateStr] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDateStr, setStartDateStr] = useState(() => {
+    // Local date; toISOString is UTC, which is already tomorrow on a Vancouver evening.
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
   const startDate = useMemo(() => new Date(startDateStr + 'T00:00:00'), [startDateStr]);
 
   const [rateChanges, setRateChanges] = useState([]);

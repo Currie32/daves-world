@@ -24,7 +24,6 @@ firestore.rules      # Firestore security rules
 |---|---|---|
 | `/` | Home.jsx | Landing page with project cards |
 | `/recipes` | Cookbooks.jsx | Recipe/cookbook browser, recipe search, web recipe import |
-| `/playlist-generator` | PlaylistGenerator.jsx | Spotify music discovery with playback + feedback |
 | `/recommendations` | Recommendations.jsx | Curated recommendations with map + admin CRUD |
 | `/weather-forecast` | WeatherForecast.jsx | Ensemble weather forecast with uncertainty viz |
 | `/movie-finder` | MovieFinder.jsx | Movie discovery by mood/taste with streaming availability |
@@ -33,7 +32,7 @@ firestore.rules      # Firestore security rules
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
 | `/events` | Events.jsx | Metro Vancouver events browser: search, map, calendar |
 | `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
-| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: continue listening, latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded); in-page player (`lib/useSpotifyWebPlayer.js`) |
+| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: continue listening, latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded) and the Playlist sub-tab (`BetterSpotifyPlaylist.jsx`, formerly the Playlist Generator page; `/playlist-generator` redirects there); in-page player with play queue (`lib/useSpotifyWebPlayer.js`) |
 
 ## Design System
 
@@ -45,7 +44,7 @@ firestore.rules      # Firestore security rules
 ## Environment Variables (`frontend/.env.local`)
 
 - `VITE_FIREBASE_*` — Firebase config
-- `VITE_SPOTIFY_CLIENT_ID` — Spotify PKCE auth (Playlist Generator)
+- `VITE_SPOTIFY_CLIENT_ID` — default Spotify app in `lib/spotify.js` (was used by the Playlist Generator page; no page uses it now)
 - `VITE_SPOTIFY_BETTER_CLIENT_ID` — separate Spotify app ("music-box") for Better Spotify; its redirect URIs are registered there
 - `VITE_GOOGLE_MAPS_API_KEY` — Google Places autocomplete
 - `VITE_ADMIN_UID` — Firebase UID for admin-only features

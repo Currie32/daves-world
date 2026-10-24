@@ -1,5 +1,7 @@
+// Playlist tab of Better Spotify (formerly the standalone Playlist Generator page):
+// generates a playlist from seed artists/genres + mood and plays it in the page's player.
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { CLIENT_ID, startAuth, completeAuth, clearTokens, spGet } from '../lib/spotify';
+import { spGet } from '../lib/spotify';
 
 // ─── Spotify API ─────────────────────────────────────────────────────────────
 
@@ -8,7 +10,6 @@ async function searchArtists(q, token) {
   const data = await spGet(`/search?type=artist&limit=6&q=${encodeURIComponent(q)}`, token);
   return data.artists?.items || [];
 }
-async function getMe(token) { return spGet('/me', token); }
 
 function shuffle(arr) {
   const a = [...arr];
@@ -272,133 +273,9 @@ async function gatherTracks({ seedArtists, genres, mood, discovery, count, token
   return shuffled.slice(0, count).map(e => ({ ...e.track, _provenance: e.provenance }));
 }
 
-// ─── Spotify Web Playback SDK ─────────────────────────────────────────────────
-
-function useSpotifyPlayer(token) {
-  const [player, setPlayer] = useState(null);
-  const [deviceId, setDeviceId] = useState(null);
-  const [playerState, setPlayerState] = useState(null);
-  const lastTrackUriRef = useRef(null);
-
-  useEffect(() => {
-    if (!token) return;
-
-    // Load SDK script if not already loaded
-    if (!window.Spotify && !document.getElementById('spotify-sdk')) {
-      const script = document.createElement('script');
-      script.id = 'spotify-sdk';
-      script.src = 'https://sdk.scdn.co/spotify-player.js';
-      script.async = true;
-      document.body.appendChild(script);
-    }
-
-    let p = null;
-    const onReady = () => {
-      p = new window.Spotify.Player({
-        name: 'Playlist Generator',
-        getOAuthToken: cb => cb(token),
-        volume: 0.5,
-      });
-
-      p.addListener('ready', ({ device_id }) => {
-        setDeviceId(device_id);
-      });
-
-      p.addListener('player_state_changed', state => {
-        if (!state) return;
-        const currentUri = state.track_window?.current_track?.uri;
-        setPlayerState({
-          paused: state.paused,
-          position: state.position,
-          duration: state.duration,
-          trackUri: currentUri,
-        });
-        if (!state.paused) {
-          lastTrackUriRef.current = currentUri;
-        }
-      });
-
-      p.addListener('initialization_error', ({ message }) => console.error('[player] init error:', message));
-      p.addListener('authentication_error', ({ message }) => console.error('[player] auth error:', message));
-      p.addListener('account_error', ({ message }) => console.error('[player] account error:', message));
-
-      p.connect();
-      setPlayer(p);
-    };
-
-    if (window.Spotify) {
-      onReady();
-    } else {
-      window.onSpotifyWebPlaybackSDKReady = onReady;
-    }
-
-    // Reconnect player when page becomes visible again (e.g. phone screen unlocked)
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && p) {
-        p.connect();
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (p) { p.disconnect(); setPlayer(null); setDeviceId(null); }
-    };
-  }, [token]);
-
-  const play = useCallback(async (uris, offset = 0) => {
-    if (!deviceId || !token) return;
-    const uriList = Array.isArray(uris) ? uris : [uris];
-    lastTrackUriRef.current = uriList[offset] || uriList[0];
-    await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uris: uriList, offset: { position: offset } }),
-    });
-  }, [deviceId, token]);
-
-  const togglePlay = useCallback(() => {
-    if (player) player.togglePlay();
-  }, [player]);
-
-  return { deviceId, playerState, play, togglePlay };
-}
-
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const s = {
-  page: {
-    maxWidth: 720, margin: '0 auto', padding: '56px 28px 96px',
-    fontFamily: 'var(--font-body)',
-  },
-  // ── Header ──
-  header: { marginBottom: 48, textAlign: 'center' },
-  title: {
-    fontFamily: 'var(--font-display)', fontSize: 42, fontWeight: 700,
-    margin: '0 0 6px', color: 'var(--color-text)', letterSpacing: '-0.01em',
-  },
-  subtitle: { color: 'var(--color-text-muted)', margin: 0, fontSize: 16, lineHeight: 1.5 },
-  // ── Connect ──
-  connectWrap: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24, marginTop: 40 },
-  connectBtn: {
-    display: 'inline-flex', alignItems: 'center', gap: 10,
-    background: '#1DB954', color: '#fff', border: 'none', borderRadius: 28,
-    padding: '14px 32px', fontSize: 15, fontWeight: 600, cursor: 'pointer',
-    boxShadow: '0 2px 8px rgba(29,185,84,0.3)', transition: 'transform 0.1s, box-shadow 0.15s',
-  },
-  // ── User bar ──
-  userBar: {
-    display: 'flex', alignItems: 'center', gap: 12, marginBottom: 36,
-    padding: '10px 16px', background: 'var(--color-surface)',
-    border: '1px solid var(--color-border)', borderRadius: 100,
-  },
-  avatar: { width: 28, height: 28, borderRadius: '50%', objectFit: 'cover' },
-  userName: { flex: 1, fontWeight: 500, fontSize: 13, color: 'var(--color-text-muted)' },
-  disconnectBtn: {
-    background: 'none', border: 'none', borderRadius: 6,
-    padding: '4px 10px', fontSize: 12, color: 'var(--color-text-muted)', cursor: 'pointer',
-    textDecoration: 'underline', textUnderlineOffset: 2,
-  },
   // ── Form card ──
   card: {
     background: 'var(--color-surface)', border: '1px solid var(--color-border)',
@@ -487,39 +364,18 @@ const s = {
     overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
   },
   resultHeader: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    display: 'flex', alignItems: 'center', gap: 12,
     padding: '20px 24px 16px',
   },
   resultTitle: { fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600, margin: 0 },
-  // ── Player bar ──
-  playerBar: {
-    display: 'flex', alignItems: 'center', gap: 14, padding: '14px 24px',
-    background: 'var(--color-bg)', borderTop: '1px solid var(--color-border)',
-    borderBottom: '1px solid var(--color-border)',
+  playAllBtn: {
+    marginLeft: 'auto', background: 'var(--color-accent)', color: '#fff', border: 'none',
+    borderRadius: 100, padding: '6px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+    fontFamily: 'var(--font-body)',
   },
-  playBtn: {
-    width: 40, height: 40, borderRadius: '50%', border: 'none',
-    background: 'var(--color-accent)', color: '#fff', fontSize: 16,
-    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    flexShrink: 0, boxShadow: '0 2px 6px rgba(192,98,47,0.25)',
-    transition: 'transform 0.1s',
-  },
-  playerTrackInfo: { flex: 1, minWidth: 0 },
-  playerTrackName: {
-    fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap',
-    overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--color-text)',
-  },
-  playerArtist: {
-    fontSize: 12, color: 'var(--color-text-muted)', whiteSpace: 'nowrap',
-    overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1,
-  },
-  playerCounter: {
+  trackCount: {
     fontSize: 11, color: 'var(--color-text-muted)', flexShrink: 0,
     fontVariantNumeric: 'tabular-nums', letterSpacing: '0.02em',
-  },
-  playerWaiting: {
-    fontSize: 13, color: 'var(--color-text-muted)', fontStyle: 'italic',
-    padding: '14px 24px', margin: 0, borderBottom: '1px solid var(--color-border)',
   },
   // ── Track list ──
   trackList: { listStyle: 'none', margin: 0, padding: '4px 0', display: 'flex', flexDirection: 'column', gap: 0 },
@@ -566,7 +422,7 @@ const s = {
 
 // ─── ArtistSearch ─────────────────────────────────────────────────────────────
 
-function ArtistSearch({ token, selected, onAdd, onRemove }) {
+function ArtistSearch({ getToken, selected, onAdd, onRemove }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [hi, setHi] = useState(-1);
@@ -576,12 +432,12 @@ function ArtistSearch({ token, selected, onAdd, onRemove }) {
 
   useEffect(() => {
     clearTimeout(timer.current);
-    if (!query.trim()) { setResults([]); setOpen(false); return; }
+    if (!query.trim()) return; // cleared in onQueryChange
     timer.current = setTimeout(async () => {
-      try { const r = await searchArtists(query, token); setResults(r); setOpen(r.length > 0); setHi(-1); }
+      try { const r = await searchArtists(query, await getToken()); setResults(r); setOpen(r.length > 0); setHi(-1); }
       catch { setResults([]); }
     }, 300);
-  }, [query, token]);
+  }, [query, getToken]);
 
   useEffect(() => {
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
@@ -597,6 +453,11 @@ function ArtistSearch({ token, selected, onAdd, onRemove }) {
     if (e.key === 'Escape') setOpen(false);
   }
 
+  function onQueryChange(e) {
+    setQuery(e.target.value);
+    if (!e.target.value.trim()) { setResults([]); setOpen(false); }
+  }
+
   function pick(a) {
     if (!selected.find(x => x.id === a.id)) onAdd(a);
     setQuery(''); setOpen(false); setResults([]);
@@ -605,7 +466,7 @@ function ArtistSearch({ token, selected, onAdd, onRemove }) {
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <input style={s.input} placeholder="Search for artists to add..." value={query}
-        onChange={e => setQuery(e.target.value)} onKeyDown={onKey}
+        onChange={onQueryChange} onKeyDown={onKey}
         onFocus={() => results.length > 0 && setOpen(true)} />
       {open && (
         <div style={s.dropdown}>
@@ -734,97 +595,71 @@ const MOODS = [
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-export default function PlaylistGenerator() {
-  const [token, setToken] = useState(null);
-  const [user, setUser] = useState(null);
-  const [authError, setAuthError] = useState('');
+// The last generated playlist (and the settings that made it) survive tab switches and reloads.
+const SAVED_KEY = 'bs_playlist_v1';
 
-  const [artists, setArtists] = useState([]);
-  const [genres, setGenres] = useState([]);
-  const [mood, setMood] = useState(null);
-  const [discovery, setDiscovery] = useState(50);
-  const [count, setCount] = useState(20);
+function loadSaved() {
+  try { return JSON.parse(localStorage.getItem(SAVED_KEY)) || {}; } catch { return {}; }
+}
+
+// Keep only what the list and player use; full track objects are large.
+function trimTrack(t) {
+  return {
+    id: t.id, uri: t.uri, name: t.name, duration_ms: t.duration_ms,
+    artists: (t.artists || []).map(a => ({ id: a.id, name: a.name })),
+    album: { images: t.album?.images || [] },
+    external_urls: t.external_urls,
+  };
+}
+
+// getToken: async () => a current access token. player: Better Spotify's useSpotifyWebPlayer.
+// onPlay(track, queue): plays track, then carries on through queue.
+export default function PlaylistTab({ getToken, player, onPlay }) {
+  const [saved] = useState(loadSaved);
+  const [artists, setArtists] = useState(saved.artists || []);
+  const [genres, setGenres] = useState(saved.genres || []);
+  const [mood, setMood] = useState(saved.mood || null);
+  const [discovery, setDiscovery] = useState(saved.discovery ?? 50);
+  const [count, setCount] = useState(saved.count ?? 20);
 
   const [generating, setGenerating] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [genError, setGenError] = useState('');
-  const [tracks, setTracks] = useState([]);
-  const [activeTrackIdx, setActiveTrackIdx] = useState(0);
-  const [playbackStarted, setPlaybackStarted] = useState(false);
+  const [tracks, setTracks] = useState(saved.tracks || []);
   const [feedback, setFeedback] = useState(loadFeedback);
 
-  const { deviceId, playerState, play, togglePlay } = useSpotifyPlayer(token);
-
-  const activeTrack = tracks[activeTrackIdx] || null;
-
-  // Sync activeTrackIdx from Spotify's state (handles auto-advance and wake from sleep)
   useEffect(() => {
-    if (!playbackStarted || !playerState?.trackUri || !tracks.length) return;
-    const spotifyIdx = tracks.findIndex(t => t.uri === playerState.trackUri);
-    if (spotifyIdx >= 0 && spotifyIdx !== activeTrackIdx) {
-      prevIdxRef.current = spotifyIdx;
-      setActiveTrackIdx(spotifyIdx);
-    }
-  }, [playerState?.trackUri]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Play track when user-initiated index change occurs (only after playback has started)
-  const prevIdxRef = useRef(-1);
-  useEffect(() => {
-    if (!playbackStarted || !deviceId || !activeTrack) return;
-    if (activeTrackIdx !== prevIdxRef.current) {
-      const allUris = tracks.map(t => t.uri);
-      play(allUris, activeTrackIdx);
-      prevIdxRef.current = activeTrackIdx;
-    }
-  }, [activeTrackIdx, playbackStarted, deviceId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function startPlaying(idx) {
-    const i = idx ?? activeTrackIdx;
-    setActiveTrackIdx(i);
-    setPlaybackStarted(true);
-    const allUris = tracks.map(t => t.uri);
-    if (allUris.length && deviceId) play(allUris, i);
-  }
-
-  useEffect(() => {
-    async function init() {
-      let t;
-      try { t = await completeAuth(); }
-      catch { setAuthError('Could not connect to Spotify. Please try again.'); return; }
-      if (!t) return;
-      setToken(t);
-      try {
-        const me = await getMe(t);
-        setUser(me);
-      } catch { clearTokens(); }
-    }
-    init();
-  }, []);
+    try {
+      localStorage.setItem(SAVED_KEY, JSON.stringify({
+        artists: artists.map(a => ({ id: a.id, name: a.name })),
+        genres, mood, discovery, count, tracks,
+      }));
+    } catch { /* storage full or unavailable */ }
+  }, [artists, genres, mood, discovery, count, tracks]);
 
   const generate = useCallback(async () => {
-    if (!token) return;
     if (artists.length === 0 && genres.length === 0) {
       setGenError('Select at least one artist or genre to get started.');
       return;
     }
-    setGenError(''); setGenerating(true); setTracks([]); setActiveTrackIdx(0); setPlaybackStarted(false); setProgressMsg('');
+    setGenError(''); setGenerating(true); setProgressMsg('');
     try {
       const chosen = await gatherTracks({
-        seedArtists: artists, genres, mood, discovery, count, token,
+        seedArtists: artists, genres, mood, discovery, count, token: await getToken(),
         onProgress: setProgressMsg,
       });
       if (chosen.length === 0) {
         setGenError('No tracks found. Try adding more artists or adjusting the discovery slider.');
         return;
       }
-      setTracks(chosen);
+      setTracks(chosen.map(trimTrack));
     } catch (e) {
       setGenError(e.message || 'Something went wrong. Please try again.');
     } finally {
       setGenerating(false);
       setProgressMsg('');
     }
-  }, [token, artists, genres, mood, discovery, count]);
+  }, [getToken, artists, genres, mood, discovery, count]);
 
   function handleFeedback(track, value) {
     const artistName = track.artists?.[0]?.name || '';
@@ -836,49 +671,15 @@ export default function PlaylistGenerator() {
     setFeedback({ ...updated });
   }
 
-  if (!token) {
-    if (!CLIENT_ID) {
-      return (
-        <div style={s.page}>
-          <div style={s.header}><h1 style={s.title}>Playlist Generator</h1></div>
-          <div style={s.error}><strong>Setup required:</strong> Add <code>VITE_SPOTIFY_CLIENT_ID</code> to <code>.env.local</code>.</div>
-        </div>
-      );
-    }
-    return (
-      <div style={s.page}>
-        <div style={s.header}>
-          <h1 style={s.title}>Playlist Generator</h1>
-          <p style={s.subtitle}>Discover new music based on your taste.</p>
-        </div>
-        <div style={s.connectWrap}>
-          {authError && <div style={s.error}>{authError}</div>}
-          <button style={s.connectBtn} onClick={() => startAuth('/playlist-generator')}><SpotifyIcon /> Connect with Spotify</button>
-        </div>
-      </div>
-    );
-  }
+  const activeUri = player.item?.uri;
 
   return (
-    <div style={s.page}>
-      <div style={s.header}>
-        <h1 style={s.title}>Playlist Generator</h1>
-        <p style={s.subtitle}>Discover new music from artists and genres.</p>
-      </div>
-
-      {user && (
-        <div style={s.userBar}>
-          {user.images?.[0]?.url && <img src={user.images[0].url} alt="" style={s.avatar} />}
-          <span style={s.userName}>{user.display_name}</span>
-          <button style={s.disconnectBtn} onClick={() => { clearTokens(); setToken(null); setUser(null); }}>Disconnect</button>
-        </div>
-      )}
-
+    <div>
       {/* ── Seeds card ── */}
       <div style={s.card}>
         <div style={s.section}>
           <label style={s.label}>Artists</label>
-          <ArtistSearch token={token} selected={artists}
+          <ArtistSearch getToken={getToken} selected={artists}
             onAdd={a => setArtists(p => [...p, a])}
             onRemove={id => setArtists(p => p.filter(a => a.id !== id))} />
         </div>
@@ -945,35 +746,16 @@ export default function PlaylistGenerator() {
         <div style={s.result}>
           <div style={s.resultHeader}>
             <h2 style={s.resultTitle}>Your Playlist</h2>
-            <span style={s.playerCounter}>{tracks.length} tracks</span>
+            <button style={s.playAllBtn} onClick={() => onPlay(tracks[0], tracks)}>▶ Play all</button>
+            <span style={s.trackCount}>{tracks.length} tracks</span>
           </div>
-
-          {activeTrack && deviceId ? (
-            <div style={s.playerBar}>
-              <button style={s.playBtn} onClick={() => playbackStarted ? togglePlay() : startPlaying()}>
-                {playbackStarted && playerState?.paused === false ? '\u23F8' : '\u25B6'}
-              </button>
-              <div style={s.playerTrackInfo}>
-                <div style={s.playerTrackName}>{activeTrack.name}</div>
-                <div style={s.playerArtist}>{activeTrack.artists?.map(a => a.name).join(', ')}</div>
-              </div>
-              <span style={s.playerCounter}>
-                {activeTrackIdx + 1} / {tracks.length}
-              </span>
-            </div>
-          ) : !deviceId ? (
-            <p style={s.playerWaiting}>Connecting to Spotify...</p>
-          ) : null}
 
           <ul style={s.trackList}>
             {tracks.map((t, i) => {
-              const active = i === activeTrackIdx;
+              const active = t.uri === activeUri;
               return (
                 <li key={t.id} style={s.track(active)}
-                  onClick={() => {
-                    if (i === activeTrackIdx && playbackStarted) { togglePlay(); }
-                    else { startPlaying(i); }
-                  }}>
+                  onClick={() => { if (active) player.togglePlay(); else onPlay(t, tracks); }}>
                   <span style={s.trackNum}>{i + 1}</span>
                   {t.album?.images?.[2]?.url && <img src={t.album.images[2].url} alt="" style={s.trackThumb} />}
                   <div style={s.trackInfo}>

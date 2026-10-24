@@ -8,14 +8,6 @@
     "comingSoon": false
   },
   {
-    "id": "playlist-generator",
-    "title": "Playlist Generator",
-    "description": "Creates a Spotify playlist based on...",
-    "emoji": "🎵",
-    "route": "/playlist-generator",
-    "comingSoon": false
-  },
-  {
     "id": "recommendations",
     "title": "Recommendations",
     "description": "Places and things that I like.",
@@ -82,7 +74,7 @@
   {
     "id": "better-spotify",
     "title": "Better Spotify",
-    "description": "New podcast episodes from the shows you follow.",
+    "description": "Podcasts, song recommendations and playlists.",
     "emoji": "🎧",
     "route": "/better-spotify",
     "comingSoon": false

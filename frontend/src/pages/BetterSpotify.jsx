@@ -5,8 +5,9 @@ import { doc, getDoc, setDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
 import { useSpotifyWebPlayer, embedHeight, isEpisode } from '../lib/useSpotifyWebPlayer';
+import PlaylistTab from './BetterSpotifyPlaylist';
 
-// Better Spotify uses its own Spotify app (separate redirect URIs from Playlist Generator).
+// Better Spotify uses its own Spotify app ("music-box"), not the default VITE_SPOTIFY_CLIENT_ID one.
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_BETTER_CLIENT_ID || '';
 
 const RECENT_DAYS = 14;
@@ -524,7 +525,7 @@ function itemInfo(it) {
 
 // Fixed bottom bar. SDK engine: our own controls. Embed engine: Spotify's embed player.
 function PlayerBar({ player }) {
-  const { engine, item, state, error, togglePlay, seek, skip, close, embedElRef } = player;
+  const { engine, item, queue, state, error, togglePlay, next, prev, seek, skip, close, embedElRef } = player;
   const [now, setNow] = useState(() => Date.now());
   const playing = engine === 'sdk' && state && !state.paused && state.uri === item?.uri;
   useEffect(() => {
@@ -540,6 +541,13 @@ function PlayerBar({ player }) {
   const position = live ? Math.min(state.duration, state.position + (state.paused ? 0 : Math.max(0, now - state.at))) : 0;
   const duration = live ? state.duration : item.duration_ms;
   const episode = isEpisode(item);
+  const qi = queue ? queue.findIndex(t => t.uri === item.uri) : -1;
+  const prevBtn = qi >= 0 && (
+    <button style={{ ...s.skipBtn, opacity: qi === 0 ? 0.4 : 1 }} onClick={prev} disabled={qi === 0} aria-label="Previous track"><PrevIcon /></button>
+  );
+  const nextBtn = qi >= 0 && (
+    <button style={{ ...s.skipBtn, opacity: qi === queue.length - 1 ? 0.4 : 1 }} onClick={next} disabled={qi === queue.length - 1} aria-label="Next track"><NextIcon /></button>
+  );
 
   return (
     <div style={s.playerBar}>
@@ -556,10 +564,12 @@ function PlayerBar({ player }) {
             </div>
             <div style={s.playerControls}>
               {episode && <button style={s.skipBtn} onClick={() => skip(-15_000)} aria-label="Back 15 seconds">−15s</button>}
+              {prevBtn}
               <button style={s.bigPlayBtn} onClick={togglePlay} disabled={!live}
                 aria-label={playing ? 'Pause' : 'Play'}>
                 {!live ? '…' : playing ? <PauseIcon /> : <PlayIcon />}
               </button>
+              {nextBtn}
               {episode && <button style={s.skipBtn} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>}
             </div>
           </div>
@@ -582,6 +592,8 @@ function PlayerBar({ player }) {
                   <button style={s.skipBtn} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>
                 </>
               )}
+              {prevBtn}
+              {nextBtn}
             </span>
           )}
           <a href={openUrl} target="_blank" rel="noreferrer" style={s.openLink}>Open in Spotify</a>
@@ -831,7 +843,27 @@ function TrackRow({ track, onPlay, onDismiss }) {
   );
 }
 
-function MusicTab({ onPlay }) {
+// Music: sub-tabs for song recommendations and the playlist generator.
+function MusicTab({ view, setView, onPlay, player }) {
+  return (
+    <>
+      <div style={s.subTabBar}>
+        <div style={s.subTabs} role="tablist">
+          {[['recs', 'Recommended'], ['playlist', 'Playlist']].map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={view === id} style={s.subTab(view === id)} onClick={() => setView(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {view === 'playlist'
+        ? <PlaylistTab getToken={freshToken} player={player} onPlay={onPlay} />
+        : <SongRecsView onPlay={onPlay} />}
+    </>
+  );
+}
+
+function SongRecsView({ onPlay }) {
   const [result, setResult] = useState(readMusicCache);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
@@ -968,16 +1000,25 @@ function MusicDebug({ debug }) {
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+const TABS = [['podcasts', 'Podcasts'], ['music', 'Music']];
+
 export default function BetterSpotify() {
   const [token, setToken] = useState(null);
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState('');
   const [ready, setReady] = useState(false);
-  const [tab, setTab] = useState('podcasts');
+  // ?tab= lets links open a specific tab; ?tab=playlist (the old /playlist-generator page)
+  // opens Music → Playlist.
+  const [tab, setTab] = useState(() => {
+    const t = new URLSearchParams(window.location.search).get('tab');
+    return t === 'playlist' ? 'music' : TABS.some(([id]) => id === t) ? t : 'podcasts';
+  });
+  const [musicView, setMusicView] = useState(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'playlist' ? 'playlist' : 'recs');
   const player = useSpotifyWebPlayer(freshToken, saveProgress);
   const play = player.play;
   // Episodes resume from the furthest/most recent known position.
-  const onPlay = useCallback(item => play(isEpisode(item) ? withLocalProgress(item) : item), [play]);
+  const onPlay = useCallback((item, queue) => play(isEpisode(item) ? withLocalProgress(item) : item, queue), [play]);
 
   useEffect(() => {
     (async () => {
@@ -1042,14 +1083,15 @@ export default function BetterSpotify() {
       )}
 
       <div style={s.tabs} role="tablist">
-        {[['podcasts', 'Podcasts'], ['music', 'Music']].map(([id, label]) => (
+        {TABS.map(([id, label]) => (
           <button key={id} role="tab" aria-selected={tab === id} style={s.tab(tab === id)} onClick={() => setTab(id)}>
             {label}
           </button>
         ))}
       </div>
 
-      {tab === 'podcasts' ? <PodcastsTab onPlay={onPlay} /> : <MusicTab onPlay={onPlay} />}
+      {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
+      {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} player={player} />}
       <PlayerBar player={player} />
       {player.item && <div style={{ height: embedHeight(player.item) + 40 }} />}
     </div>
@@ -1071,6 +1113,18 @@ function CloseIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
       <path d="M6 6l12 12M18 6L6 18" />
     </svg>
+  );
+}
+
+function PrevIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
+  );
+}
+
+function NextIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z" /></svg>
   );
 }
 

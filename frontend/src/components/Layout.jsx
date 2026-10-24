@@ -41,18 +41,20 @@ export default function Layout({ children }) {
     }}>
       {!isHome && (
         <nav style={{
-          padding: '0.75rem 1.5rem',
+          padding: '0.85rem 1.5rem',
+          background: 'var(--color-surface)',
           borderBottom: '1px solid var(--color-border)',
         }}>
           <Link to="/" style={{
             fontFamily: 'var(--font-display)',
-            fontSize: '1.1rem',
+            fontSize: '1.4rem',
+            lineHeight: 1.2,
             color: 'var(--color-text)',
             textDecoration: 'none',
             transition: 'color 0.15s',
           }}
-            onMouseEnter={e => e.target.style.color = 'var(--color-accent)'}
-            onMouseLeave={e => e.target.style.color = 'var(--color-text)'}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--color-accent)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--color-text)'}
           >
             Dave's World
           </Link>
@@ -89,7 +91,7 @@ export default function Layout({ children }) {
                 color: 'var(--color-text-muted)',
                 fontSize: '0.85rem',
                 cursor: 'pointer',
-                fontFamily: 'var(--font-body)',
+                fontFamily: 'var(--font-display)',
                 padding: 0,
               }}
             >
@@ -104,7 +106,7 @@ export default function Layout({ children }) {
                 color: 'var(--color-text-muted)',
                 fontSize: '0.85rem',
                 cursor: 'pointer',
-                fontFamily: 'var(--font-body)',
+                fontFamily: 'var(--font-display)',
                 padding: 0,
               }}
             >
