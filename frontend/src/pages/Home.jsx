@@ -2,6 +2,9 @@ import { Link } from 'react-router-dom';
 import projects from '../data/projects.json';
 import { useIsMobile } from '../hooks/useIsMobile';
 
+// Tools are listed alphabetically, whatever their order in projects.json.
+const sortedProjects = [...projects].sort((a, b) => a.title.localeCompare(b.title));
+
 export default function Home() {
   const mobile = useIsMobile();
   return (
@@ -24,7 +27,7 @@ export default function Home() {
           gridAutoRows: '1fr', // every card the same height
           gap: mobile ? '0.5rem' : '1rem',
         }}>
-          {projects.map((project) => (
+          {sortedProjects.map((project) => (
             <ProjectCard key={project.id} project={project} mobile={mobile} />
           ))}
         </div>
