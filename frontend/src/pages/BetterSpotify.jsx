@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from 'react';
 import { startAuth, completeAuth, getToken, clearTokens, spGet } from '../lib/spotify';
 import { recommendSongs, songKeys } from '../lib/musicRecs';
 import { doc, getDoc, setDoc, arrayUnion } from 'firebase/firestore';
@@ -357,13 +357,31 @@ function imageUrl(images, minWidth = 64) {
 
 // ─── Components ──────────────────────────────────────────────────────────────
 
+// What's in the player, so list rows can show pause on the playing item and toggle it.
+const NowPlaying = createContext({ uri: null, playing: false, toggle: () => {} });
+
+// Row click: play the item, or pause/resume it if it's already in the player.
+function useRowPlayback(item, onPlay) {
+  const np = useContext(NowPlaying);
+  const active = !!item && np.uri === item.uri;
+  const playing = active && np.playing;
+  return {
+    active,
+    playing,
+    onClick: () => (active ? np.toggle() : onPlay(item)),
+    icon: playing ? <PauseIcon /> : <PlayIcon />,
+    title: playing ? 'Pause' : active ? 'Resume' : 'Play',
+  };
+}
+
 function EpisodeRow({ ep, onPlay }) {
+  const row = useRowPlayback(ep, onPlay);
   const resume = ep.resume_point;
   const played = resume?.fully_played;
   const progress = !played && resume?.resume_position_ms > 0 ? resume.resume_position_ms / ep.duration_ms : 0;
   const remaining = progress ? ep.duration_ms - resume.resume_position_ms : 0;
   return (
-    <button style={s.episode(played)} onClick={() => onPlay(ep)} title="Play">
+    <button style={s.episode(played)} onClick={row.onClick} title={row.title}>
       <img src={imageUrl(ep.images) || imageUrl(ep._show.images)} alt="" style={s.epArt} />
       <div style={s.epBody}>
         <div style={s.epShow}>{ep._show.name}</div>
@@ -378,7 +396,7 @@ function EpisodeRow({ ep, onPlay }) {
           <div style={s.progressTrack}><div style={{ ...s.progressFill, width: `${Math.min(100, progress * 100)}%` }} /></div>
         )}
       </div>
-      <span style={s.playIcon}><PlayIcon /></span>
+      <span style={row.active ? { ...s.playIcon, ...s.playIconActive } : s.playIcon}>{row.icon}</span>
     </button>
   );
 }
@@ -587,12 +605,7 @@ function PlayerBar({ player, mobile }) {
       <span style={s.playerTime}>{clock(duration || 0)}</span>
     </>
   );
-  const speedBtn = source === 'audio' && (
-    <button style={s.speedBtn} onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}
-      aria-label={`Playback speed ${rate}×, tap to change`}>
-      {rate}×
-    </button>
-  );
+  const speedBtn = source === 'audio' && <SpeedMenu rate={rate} setRate={setRate} />;
   const openLink = <a href={openUrl} target="_blank" rel="noreferrer" style={s.openLink}>Open in Spotify</a>;
   const closeBtn = <button style={s.closeBtn} onClick={close} aria-label="Close player"><CloseIcon size={mobile ? 20 : 14} /></button>;
   const embedBox = <div ref={embedElRef} style={{ ...s.embedBox, height: embedHeight(item, mobile) }} />;
@@ -655,6 +668,41 @@ function PlayerBar({ player, mobile }) {
         </div>
       </div>
     </>
+  );
+}
+
+// Small popup menu of playback speeds, opening upward from its button.
+function SpeedMenu({ rate, setRate }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = e => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    const onKey = e => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return (
+    <span ref={ref} style={s.speedWrap}>
+      <button style={s.speedBtn} onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}
+        aria-label={`Playback speed ${rate}×`}>
+        {rate}×<span style={s.speedCaret}>▾</span>
+      </button>
+      {open && (
+        <div role="menu" style={s.speedMenu}>
+          {RATES.map(r => (
+            <button key={r} role="menuitemradio" aria-checked={r === rate} style={s.speedItem(r === rate)}
+              onClick={() => { setRate(r); setOpen(false); }}>
+              {r}×
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -881,9 +929,10 @@ function withoutDismissed(result, d) {
 }
 
 function TrackRow({ track, onPlay, onDismiss }) {
+  const row = useRowPlayback(track, onPlay);
   return (
     <div style={s.trackRow}>
-      <button style={s.trackMain} onClick={() => onPlay(track)} title="Play">
+      <button style={s.trackMain} onClick={row.onClick} title={row.title}>
         <img src={imageUrl(track.album?.images)} alt="" style={s.trackArt} />
         <div style={s.epBody}>
           <div style={s.trackTitle}>{track.name}</div>
@@ -894,7 +943,7 @@ function TrackRow({ track, onPlay, onDismiss }) {
             <span>{track.album?.release_date?.slice(0, 4)}</span>
           </div>
         </div>
-        <span style={s.playIcon}><PlayIcon /></span>
+        <span style={row.active ? { ...s.playIcon, ...s.playIconActive } : s.playIcon}>{row.icon}</span>
       </button>
       <button style={s.dismissBtn} onClick={() => onDismiss(track)}
         title="Never recommend this song" aria-label={`Never recommend ${track.name}`}>
@@ -1083,6 +1132,13 @@ export default function BetterSpotify() {
   const play = player.play;
   // Episodes resume from the furthest/most recent known position.
   const onPlay = useCallback((item, queue) => play(isEpisode(item) ? withLocalProgress(item) : item, queue), [play]);
+  // While the feed lookup runs the item counts as playing (it's about to start).
+  const { item: nowItem, state: nowState, source: nowSource, togglePlay } = player;
+  const nowPlaying = useMemo(() => ({
+    uri: nowItem?.uri || null,
+    playing: !!nowItem && (nowSource === 'resolving' || (nowState?.uri === nowItem.uri && !nowState.paused)),
+    toggle: togglePlay,
+  }), [nowItem, nowState, nowSource, togglePlay]);
 
   useEffect(() => {
     (async () => {
@@ -1154,8 +1210,10 @@ export default function BetterSpotify() {
         ))}
       </div>
 
-      {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
-      {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} player={player} />}
+      <NowPlaying.Provider value={nowPlaying}>
+        {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
+        {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} player={player} />}
+      </NowPlaying.Provider>
       <PlayerBar player={player} mobile={mobile} />
     </div>
   );
@@ -1316,6 +1374,7 @@ const s = {
     width: 34, height: 34, borderRadius: '50%', background: '#1DB954', color: '#fff', flexShrink: 0,
     display: 'flex', alignItems: 'center', justifyContent: 'center',
   },
+  playIconActive: { boxShadow: '0 0 0 4px rgba(29,185,84,0.22)' },
   showList: {
     background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 12, overflow: 'hidden',
   },
@@ -1380,11 +1439,23 @@ const s = {
   mBottom: { display: 'flex', flexDirection: 'column', gap: 10 },
   mHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 14 },
   mHeadRight: { display: 'flex', alignItems: 'center', gap: 12 },
+  speedWrap: { position: 'relative', flexShrink: 0, display: 'inline-flex' },
   speedBtn: {
-    minWidth: 52, background: 'none', border: '1px solid var(--color-border)', borderRadius: 100, padding: '5px 10px',
-    fontSize: 13, fontWeight: 700, cursor: 'pointer', color: 'var(--color-text)', fontFamily: 'var(--font-body)',
-    fontVariantNumeric: 'tabular-nums', flexShrink: 0,
+    background: 'none', border: 'none', padding: '4px 2px', cursor: 'pointer',
+    fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', fontFamily: 'var(--font-body)',
+    fontVariantNumeric: 'tabular-nums', display: 'inline-flex', alignItems: 'center', gap: 3,
   },
+  speedCaret: { fontSize: 10 },
+  speedMenu: {
+    position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, zIndex: 1001,
+    background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 10,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.14)', padding: 4, display: 'flex', flexDirection: 'column', minWidth: 72,
+  },
+  speedItem: active => ({
+    background: active ? 'var(--color-bg)' : 'none', border: 'none', borderRadius: 6, padding: '7px 12px',
+    textAlign: 'left', cursor: 'pointer', fontFamily: 'var(--font-body)', fontSize: 14, fontVariantNumeric: 'tabular-nums',
+    fontWeight: active ? 700 : 400, color: active ? 'var(--color-accent)' : 'var(--color-text)',
+  }),
   mInfo: { display: 'flex', alignItems: 'center', gap: 16, minWidth: 0 },
   mArt: { width: 72, height: 72, borderRadius: 10, objectFit: 'cover', flexShrink: 0 },
   mTitle: { fontSize: 16, fontWeight: 600, lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' },

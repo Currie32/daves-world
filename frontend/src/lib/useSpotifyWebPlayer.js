@@ -19,8 +19,9 @@ const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const SDK_SUPPORTED = !IS_IOS && !!navigator.requestMediaKeySystemAccess;
 
-// Playback speeds for feed audio, in the order the speed button cycles through.
-export const RATES = [1, 1.25, 1.5, 1.75, 2, 0.75];
+// Playback speeds offered for feed audio; DEFAULT_RATE until you pick one.
+export const RATES = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 1.75, 2];
+const DEFAULT_RATE = 1.1;
 const RATE_KEY = 'bs_play_rate';
 // An empty WAV, played inside the click so the browser lets this <audio> element start
 // the real file afterwards (finding it is async, and mobile browsers only allow audio
@@ -32,8 +33,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function readRate() {
   try {
     const r = Number(localStorage.getItem(RATE_KEY));
-    return RATES.includes(r) ? r : 1;
-  } catch { return 1; }
+    return RATES.includes(r) ? r : DEFAULT_RATE;
+  } catch { return DEFAULT_RATE; }
 }
 
 let sdkPromise = null;
@@ -112,7 +113,7 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress, { large = false,
   const [queue, setQueue] = useState(null);
   const [source, setSource] = useState(null); // current item: 'resolving' | 'audio' | 'spotify'
   const [rate, setRateState] = useState(readRate);
-  // sdk/audio: { paused, position, duration, at, uri, rate }
+  // { paused, position, duration, at, uri, rate } from whichever source is playing
   const [state, setState] = useState(null);
   const [error, setError] = useState('');
 
@@ -315,6 +316,8 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress, { large = false,
         c.addListener('playback_update', e => {
           const { isPaused, position, duration } = e.data || {};
           embedPos.current = { position, duration, paused: isPaused, at: Date.now() };
+          // So the page can show play/pause state (the embed draws its own controls).
+          setState({ paused: isPaused, position, duration, at: Date.now(), uri: itemRef.current?.uri, rate: 1 });
           // Jump to the episode's resume point once it has started playing.
           if (pendingSeek.current && !isPaused && duration > 0) {
             const to = pendingSeek.current;
@@ -449,6 +452,7 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress, { large = false,
   }, []);
 
   const togglePlay = useCallback(() => {
+    if (sourceRef.current === 'resolving') return; // nothing is playing yet
     if (sourceRef.current === 'audio') {
       const a = audioRef.current;
       if (a.paused) a.play().catch(() => {}); else a.pause();
