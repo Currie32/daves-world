@@ -4,7 +4,9 @@ import { recommendSongs, songKeys } from '../lib/musicRecs';
 import { doc, getDoc, setDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
-import { useSpotifyWebPlayer, embedHeight, isEpisode } from '../lib/useSpotifyWebPlayer';
+import { useIsMobile } from '../hooks/useIsMobile';
+import { useSpotifyWebPlayer, embedHeight, isEpisode, RATES } from '../lib/useSpotifyWebPlayer';
+import { findEpisodeAudio, forgetEpisodeAudio } from '../lib/podcastFeed';
 import PlaylistTab from './BetterSpotifyPlaylist';
 
 // Better Spotify uses its own Spotify app ("music-box"), not the default VITE_SPOTIFY_CLIENT_ID one.
@@ -523,84 +525,136 @@ function itemInfo(it) {
   return { title: it.name, subtitle: it.artists?.map(a => a.name).join(', '), art: imageUrl(it.album?.images) };
 }
 
-// Fixed bottom bar. SDK engine: our own controls. Embed engine: Spotify's embed player.
-function PlayerBar({ player }) {
-  const { engine, item, queue, state, error, togglePlay, next, prev, seek, skip, close, embedElRef } = player;
+// Fixed bottom bar. Feed audio and the SDK engine: our own controls (feed audio adds a
+// speed button). Embed engine: Spotify's embed player. Larger buttons on phones.
+function PlayerBar({ player, mobile }) {
+  const { engine, source, item, queue, state, error, rate, togglePlay, next, prev, seek, skip, setRate, close, embedElRef } = player;
   const [now, setNow] = useState(() => Date.now());
-  const playing = engine === 'sdk' && state && !state.paused && state.uri === item?.uri;
+  // Our controls drive feed audio, or Spotify when the SDK engine is playing.
+  const live = !!item && state?.uri === item.uri && (source === 'audio' || (source === 'spotify' && engine === 'sdk'));
+  const playing = live && !state.paused;
   useEffect(() => {
     if (!playing) return;
     const id = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(id);
   }, [playing]);
+
+  // The bar is fixed, so reserve its height at the end of the page to keep content reachable.
+  const barRef = useRef(null);
+  const [barHeight, setBarHeight] = useState(0);
+  const open = !!item;
+  useEffect(() => {
+    const el = barRef.current;
+    if (!open || !el) return;
+    const ro = new ResizeObserver(() => setBarHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open]);
+
   if (!item) return null;
 
   const info = itemInfo(item);
   const openUrl = item.external_urls?.spotify || `https://open.spotify.com/${item.uri.split(':')[1]}/${item.id}`;
-  const live = engine === 'sdk' && state?.uri === item.uri;
-  const position = live ? Math.min(state.duration, state.position + (state.paused ? 0 : Math.max(0, now - state.at))) : 0;
+  const showEmbed = engine === 'embed' && source === 'spotify';
+  const elapsed = state && !state.paused ? Math.max(0, now - state.at) * (state.rate || 1) : 0;
+  const position = live ? Math.min(state.duration, state.position + elapsed) : 0;
+  const status = source === 'resolving' ? 'Loading…' : engine === 'pending' ? 'Connecting player…' : '';
   const duration = live ? state.duration : item.duration_ms;
   const episode = isEpisode(item);
   const qi = queue ? queue.findIndex(t => t.uri === item.uri) : -1;
+
+  const skipStyle = mobile ? s.mSkipBtn : s.skipBtn;
+  const back15 = episode && <button style={skipStyle} onClick={() => skip(-15_000)} aria-label="Back 15 seconds">−15s</button>;
+  const fwd15 = episode && <button style={skipStyle} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>;
+  const iconSize = mobile ? 22 : 14;
   const prevBtn = qi >= 0 && (
-    <button style={{ ...s.skipBtn, opacity: qi === 0 ? 0.4 : 1 }} onClick={prev} disabled={qi === 0} aria-label="Previous track"><PrevIcon /></button>
+    <button style={{ ...skipStyle, opacity: qi === 0 ? 0.4 : 1 }} onClick={prev} disabled={qi === 0} aria-label="Previous track"><PrevIcon size={iconSize} /></button>
   );
   const nextBtn = qi >= 0 && (
-    <button style={{ ...s.skipBtn, opacity: qi === queue.length - 1 ? 0.4 : 1 }} onClick={next} disabled={qi === queue.length - 1} aria-label="Next track"><NextIcon /></button>
+    <button style={{ ...skipStyle, opacity: qi === queue.length - 1 ? 0.4 : 1 }} onClick={next} disabled={qi === queue.length - 1} aria-label="Next track"><NextIcon size={iconSize} /></button>
   );
+  const playBtn = (
+    <button style={mobile ? s.mPlayBtn : s.bigPlayBtn} onClick={togglePlay} disabled={!live}
+      aria-label={playing ? 'Pause' : 'Play'}>
+      {!live ? '…' : playing ? <PauseIcon size={mobile ? 26 : 14} /> : <PlayIcon size={mobile ? 26 : 14} />}
+    </button>
+  );
+  const seekRow = (
+    <>
+      <span style={s.playerTime}>{clock(position)}</span>
+      <input type="range" min={0} max={duration || 0} step={1000} value={position} disabled={!live}
+        onChange={e => seek(Number(e.target.value))} style={s.seekBar} aria-label="Seek" />
+      <span style={s.playerTime}>{clock(duration || 0)}</span>
+    </>
+  );
+  const speedBtn = source === 'audio' && (
+    <button style={s.speedBtn} onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}
+      aria-label={`Playback speed ${rate}×, tap to change`}>
+      {rate}×
+    </button>
+  );
+  const openLink = <a href={openUrl} target="_blank" rel="noreferrer" style={s.openLink}>Open in Spotify</a>;
+  const closeBtn = <button style={s.closeBtn} onClick={close} aria-label="Close player"><CloseIcon size={mobile ? 20 : 14} /></button>;
+  const embedBox = <div ref={embedElRef} style={{ ...s.embedBox, height: embedHeight(item, mobile) }} />;
 
-  return (
-    <div style={s.playerBar}>
-      <div style={s.playerInner}>
-        {error && <div style={s.playerError}>{error}</div>}
-        {engine === 'embed' ? (
-          <div ref={embedElRef} style={{ ...s.embedBox, height: embedHeight(item) }} />
-        ) : (
-          <div style={s.playerRow}>
-            {info.art && <img src={info.art} alt="" style={s.playerArt} />}
-            <div style={s.playerText}>
-              <div style={s.playerTitle}>{info.title}</div>
-              <div style={s.playerSubtitle}>{info.subtitle}</div>
-            </div>
-            <div style={s.playerControls}>
-              {episode && <button style={s.skipBtn} onClick={() => skip(-15_000)} aria-label="Back 15 seconds">−15s</button>}
-              {prevBtn}
-              <button style={s.bigPlayBtn} onClick={togglePlay} disabled={!live}
-                aria-label={playing ? 'Pause' : 'Play'}>
-                {!live ? '…' : playing ? <PauseIcon /> : <PlayIcon />}
-              </button>
-              {nextBtn}
-              {episode && <button style={s.skipBtn} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>}
-            </div>
-          </div>
-        )}
-        <div style={s.playerFoot}>
-          {engine === 'sdk' && (
-            <>
-              <span style={s.playerTime}>{clock(position)}</span>
-              <input type="range" min={0} max={duration || 0} step={1000} value={position} disabled={!live}
-                onChange={e => seek(Number(e.target.value))} style={s.seekBar} aria-label="Seek" />
-              <span style={s.playerTime}>{clock(duration || 0)}</span>
-            </>
-          )}
-          {engine === 'pending' && <span style={s.playerTime}>Connecting player…</span>}
-          {engine === 'embed' && (
-            <span style={s.embedSkips}>
-              {episode && (
-                <>
-                  <button style={s.skipBtn} onClick={() => skip(-15_000)} aria-label="Back 15 seconds">−15s</button>
-                  <button style={s.skipBtn} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>
-                </>
-              )}
-              {prevBtn}
-              {nextBtn}
-            </span>
-          )}
-          <a href={openUrl} target="_blank" rel="noreferrer" style={s.openLink}>Open in Spotify</a>
-          <button style={s.closeBtn} onClick={close} aria-label="Close player"><CloseIcon /></button>
+  // One tree for both layouts, with the embed in the same slot, so rotating a phone
+  // (switching layouts) doesn't remount Spotify's iframe and stop playback.
+  let main, foot;
+  if (mobile) {
+    main = showEmbed ? embedBox : (
+      <div style={s.mInfo}>
+        {info.art && <img src={info.art} alt="" style={s.mArt} />}
+        <div style={s.playerText}>
+          <div style={s.mTitle}>{info.title}</div>
+          <div style={s.mSubtitle}>{info.subtitle}</div>
         </div>
       </div>
-    </div>
+    );
+    foot = showEmbed
+      ? (episode || qi >= 0) && <div style={s.mControls}>{back15}{prevBtn}{nextBtn}{fwd15}</div>
+      : (
+        <div style={s.mBottom}>
+          <div style={s.playerFoot}>
+            {status && !live ? <span style={s.playerTime}>{status}</span> : seekRow}
+          </div>
+          <div style={s.mControls}>{back15}{prevBtn}{playBtn}{nextBtn}{fwd15}</div>
+        </div>
+      );
+  } else {
+    main = showEmbed ? embedBox : (
+      <div style={s.playerRow}>
+        {info.art && <img src={info.art} alt="" style={s.playerArt} />}
+        <div style={s.playerText}>
+          <div style={s.playerTitle}>{info.title}</div>
+          <div style={s.playerSubtitle}>{info.subtitle}</div>
+        </div>
+        <div style={s.playerControls}>{back15}{prevBtn}{playBtn}{nextBtn}{fwd15}</div>
+      </div>
+    );
+    foot = (
+      <div style={s.playerFoot}>
+        {showEmbed
+          ? <span style={s.embedSkips}>{back15}{fwd15}{prevBtn}{nextBtn}</span>
+          : status && !live ? <span style={{ ...s.playerTime, flex: 1 }}>{status}</span> : seekRow}
+        {speedBtn}
+        {openLink}
+        {closeBtn}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div style={{ height: barHeight }} />
+      <div ref={barRef} style={mobile ? { ...s.playerBar, ...s.mPlayerBar } : s.playerBar}>
+        <div style={mobile ? s.mInner : s.playerInner}>
+          {mobile && <div style={s.mHead}>{openLink}<span style={s.mHeadRight}>{speedBtn}{closeBtn}</span></div>}
+          {error && <div style={s.playerError}>{error}</div>}
+          {main}
+          {foot}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -612,6 +666,13 @@ function PodcastsTab({ onPlay }) {
   const [view, setView] = useState('latest');
   const [recsNonce, setRecsNonce] = useState(0);
   const dataRef = useRef(null);
+
+  // Look up feed audio for the episodes you're most likely to play next, so they start
+  // without waiting on the lookup (results are cached).
+  const listening = data?.listening;
+  useEffect(() => {
+    listening?.slice(0, 5).forEach(ep => { findEpisodeAudio(ep); });
+  }, [listening]);
 
   // Hide from Continue listening (until you listen to it again); it rejoins the
   // latest list if it's recent.
@@ -1015,7 +1076,10 @@ export default function BetterSpotify() {
   });
   const [musicView, setMusicView] = useState(() =>
     new URLSearchParams(window.location.search).get('tab') === 'playlist' ? 'playlist' : 'recs');
-  const player = useSpotifyWebPlayer(freshToken, saveProgress);
+  const mobile = useIsMobile();
+  const player = useSpotifyWebPlayer(freshToken, saveProgress, {
+    large: mobile, findAudio: findEpisodeAudio, forgetAudio: forgetEpisodeAudio,
+  });
   const play = player.play;
   // Episodes resume from the furthest/most recent known position.
   const onPlay = useCallback((item, queue) => play(isEpisode(item) ? withLocalProgress(item) : item, queue), [play]);
@@ -1092,8 +1156,7 @@ export default function BetterSpotify() {
 
       {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
       {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} player={player} />}
-      <PlayerBar player={player} />
-      {player.item && <div style={{ height: embedHeight(player.item) + 40 }} />}
+      <PlayerBar player={player} mobile={mobile} />
     </div>
   );
 }
@@ -1108,35 +1171,35 @@ function SpotifyIcon({ size = 20 }) {
   );
 }
 
-function CloseIcon() {
+function CloseIcon({ size = 14 }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
       <path d="M6 6l12 12M18 6L6 18" />
     </svg>
   );
 }
 
-function PrevIcon() {
+function PrevIcon({ size = 14 }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
   );
 }
 
-function NextIcon() {
+function NextIcon({ size = 14 }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z" /></svg>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z" /></svg>
   );
 }
 
-function PauseIcon() {
+function PauseIcon({ size = 14 }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>
   );
 }
 
-function PlayIcon() {
+function PlayIcon({ size = 14 }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
   );
 }
 
@@ -1308,4 +1371,32 @@ const s = {
     padding: 4, display: 'flex', alignItems: 'center', flexShrink: 0,
   },
   embedBox: { borderRadius: 12, overflow: 'hidden' },
+  // Phone layout: a tall panel, about half the screen.
+  mPlayerBar: {
+    borderRadius: '18px 18px 0 0',
+    padding: '10px 18px calc(14px + env(safe-area-inset-bottom, 0px))',
+  },
+  mInner: { display: 'flex', flexDirection: 'column', gap: 10 },
+  mBottom: { display: 'flex', flexDirection: 'column', gap: 10 },
+  mHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 14 },
+  mHeadRight: { display: 'flex', alignItems: 'center', gap: 12 },
+  speedBtn: {
+    minWidth: 52, background: 'none', border: '1px solid var(--color-border)', borderRadius: 100, padding: '5px 10px',
+    fontSize: 13, fontWeight: 700, cursor: 'pointer', color: 'var(--color-text)', fontFamily: 'var(--font-body)',
+    fontVariantNumeric: 'tabular-nums', flexShrink: 0,
+  },
+  mInfo: { display: 'flex', alignItems: 'center', gap: 16, minWidth: 0 },
+  mArt: { width: 72, height: 72, borderRadius: 10, objectFit: 'cover', flexShrink: 0 },
+  mTitle: { fontSize: 16, fontWeight: 600, lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' },
+  mSubtitle: { fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  mControls: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20 },
+  mPlayBtn: {
+    width: 64, height: 64, borderRadius: '50%', border: 'none', background: '#1DB954', color: '#fff',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0,
+  },
+  mSkipBtn: {
+    width: 52, height: 52, borderRadius: '50%', border: '1px solid var(--color-border)', background: 'none',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0,
+    fontSize: 16, fontWeight: 600, color: 'var(--color-text)', fontFamily: 'var(--font-body)', padding: 0,
+  },
 };

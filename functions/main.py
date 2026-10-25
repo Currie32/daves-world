@@ -1,10 +1,14 @@
+import email.utils
 import hashlib
+import hmac
 import html
 import json
 import os
 import re
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 import firebase_admin
@@ -1177,3 +1181,190 @@ def scrape_events(req: https_fn.CallableRequest) -> dict:
 
     count = _upsert_events(events)
     return {"count": count, "source_key": source_key}
+
+
+# ─── Podcast episode audio (Better Spotify feed player) ───────────────────────
+#
+# Finds a Spotify podcast episode in the show's public RSS feed (via the iTunes
+# directory) and returns its audio file URL, so the page can play it in a plain
+# <audio> element with speed control and lock-screen controls. Spotify-exclusive
+# shows have no feed; the page falls back to Spotify playback when url is None.
+#
+# Some hosts (e.g. the BBC's) only serve the final audio over http, which an https
+# page can't play; those are returned as a signed podcast_audio_proxy link instead.
+
+_ITUNES_NS = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
+_FEED_TTL_S = 1800
+_feed_cache = {}  # feed_url -> (fetched_at, items); per function instance
+_FEED_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DavesWorld/1.0; podcast player)"}
+_PROXY_URL = "https://us-west1-daves-world-32.cloudfunctions.net/podcast_audio_proxy"
+
+
+def _norm_title(text):
+    text = html.unescape(text or "").lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _itunes_duration_s(text):
+    """'1:02:03', '62:03' or '3723' -> seconds (None if unparseable)."""
+    try:
+        parts = [float(p) for p in (text or "").strip().split(":")]
+    except ValueError:
+        return None
+    if not parts or len(parts) > 3:
+        return None
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + p
+    return secs
+
+
+def _find_podcast_feed(show, publisher):
+    resp = requests.get(
+        "https://itunes.apple.com/search",
+        params={"media": "podcast", "entity": "podcast", "term": show, "limit": 10},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    target, pub = _norm_title(show), _norm_title(publisher)
+
+    def score(result):
+        name = _norm_title(result.get("collectionName"))
+        s = 0
+        if name == target:
+            s += 3
+        elif name and (target in name or name in target):
+            s += 1
+        if pub and _norm_title(result.get("artistName")) == pub:
+            s += 1
+        return s
+
+    results = [r for r in resp.json().get("results", []) if r.get("feedUrl")]
+    best = max(results, key=score, default=None)
+    return best["feedUrl"] if best and score(best) > 0 else None
+
+
+def _feed_episodes(feed_url):
+    hit = _feed_cache.get(feed_url)
+    if hit and time.time() - hit[0] < _FEED_TTL_S:
+        return hit[1]
+    resp = requests.get(feed_url, headers=_FEED_HEADERS, timeout=20)
+    resp.raise_for_status()
+    root = ElementTree.fromstring(resp.content)
+    items = []
+    for it in root.iter("item"):
+        enc = it.find("enclosure")
+        url = enc.get("url") if enc is not None else None
+        if not url:
+            continue
+        try:
+            date = email.utils.parsedate_to_datetime(it.findtext("pubDate")).date()
+        except (TypeError, ValueError):
+            date = None
+        items.append({
+            "title": it.findtext("title") or "",
+            # https pages can't play http audio; most hosts serve both.
+            "url": re.sub(r"^http://", "https://", url.strip()),
+            "date": date,
+            "duration": _itunes_duration_s(it.findtext(_ITUNES_NS + "duration")),
+        })
+    _feed_cache[feed_url] = (time.time(), items)
+    return items
+
+
+def _match_episode(items, title, release_date, duration_s):
+    target = _norm_title(title)
+    try:
+        day = datetime.strptime(release_date, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        day = None
+    best, best_score = None, 0
+    for it in items:
+        name = _norm_title(it["title"])
+        s = 0
+        if name == target:
+            s += 10
+        elif target and name and min(len(name), len(target)) >= 12 and (name in target or target in name):
+            s += 6
+        if day and it["date"] and abs((it["date"] - day).days) <= 1:
+            s += 3
+        if duration_s and it["duration"] and abs(it["duration"] - duration_s) <= 90:
+            s += 2
+        if s > best_score:
+            best, best_score = it, s
+    # A title match, or (when titles differ between Spotify and the feed) same day + same length.
+    return best if best_score >= 5 else None
+
+
+@https_fn.on_call(invoker="public", region="us-west1", memory=256, timeout_sec=30)
+def podcast_episode_audio(req: https_fn.CallableRequest) -> dict:
+    data = req.data or {}
+    show = (data.get("show") or "").strip()
+    title = (data.get("title") or "").strip()
+    if not show or not title:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="show and title are required",
+        )
+    try:
+        feed_url = _find_podcast_feed(show, data.get("publisher") or "")
+        if not feed_url:
+            return {"url": None, "reason": "no feed"}
+        duration_ms = data.get("durationMs") or 0
+        match = _match_episode(
+            _feed_episodes(feed_url), title, data.get("releaseDate") or "",
+            duration_ms / 1000 if duration_ms else None,
+        )
+    except (requests.RequestException, ElementTree.ParseError) as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE,
+            message=f"Could not read the podcast feed: {e}",
+        )
+    if not match:
+        return {"url": None, "reason": "no matching episode"}
+    url = match["url"]
+    if _needs_proxy(url):
+        url = f"{_PROXY_URL}?{urlencode({'u': url, 's': _proxy_sig(url)})}"
+    return {"url": url}
+
+
+def _proxy_sig(url):
+    key = os.environ.get("PODCAST_PROXY_SECRET", "").encode()
+    return hmac.new(key, url.encode(), hashlib.sha256).hexdigest()
+
+
+def _needs_proxy(url):
+    """True if following the URL's redirects lands on (or passes through) plain http."""
+    try:
+        resp = requests.get(url, headers={**_FEED_HEADERS, "Range": "bytes=0-0"},
+                            stream=True, allow_redirects=True, timeout=10)
+        resp.close()
+    except requests.RequestException:
+        return False  # let the browser try it directly
+    hops = [h.headers.get("Location", "") for h in resp.history] + [resp.url]
+    return any(h.startswith("http://") for h in hops)
+
+
+# Streams http-only podcast audio to the page over https. Only signed links (made by
+# podcast_episode_audio) are served, so this isn't an open proxy. Range requests are
+# passed through so the player can seek.
+@https_fn.on_request(region="us-west1", memory=256, timeout_sec=3600)
+def podcast_audio_proxy(req: https_fn.Request) -> https_fn.Response:
+    url = req.args.get("u", "")
+    if not url.startswith("https://") or not hmac.compare_digest(req.args.get("s", ""), _proxy_sig(url)):
+        return https_fn.Response("Forbidden", status=403)
+    headers = dict(_FEED_HEADERS)
+    if req.headers.get("Range"):
+        headers["Range"] = req.headers["Range"]
+    try:
+        upstream = requests.get(url, headers=headers, stream=True, allow_redirects=True, timeout=20)
+    except requests.RequestException:
+        return https_fn.Response("Upstream unavailable", status=502)
+    if upstream.status_code not in (200, 206):
+        upstream.close()
+        return https_fn.Response("Upstream error", status=502)
+    out = {k: upstream.headers[k] for k in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
+           if k in upstream.headers}
+    out["Cache-Control"] = "private, max-age=3600"
+    return https_fn.Response(upstream.iter_content(chunk_size=64 * 1024), status=upstream.status_code, headers=out)

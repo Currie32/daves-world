@@ -1,19 +1,6 @@
-import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import projects from '../data/projects.json';
-
-const MOBILE_QUERY = '(max-width: 640px)';
-
-function useIsMobile() {
-  const [mobile, setMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
-  useEffect(() => {
-    const mq = window.matchMedia(MOBILE_QUERY);
-    const onChange = e => setMobile(e.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-  return mobile;
-}
+import { useIsMobile } from '../hooks/useIsMobile';
 
 export default function Home() {
   const mobile = useIsMobile();
