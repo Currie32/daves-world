@@ -547,14 +547,20 @@ export function useSpotifyWebPlayer(getAccessToken, onProgress, { large = false,
     }
     if (window.MediaMetadata) ms.metadata = new window.MediaMetadata(mediaInfo(item));
     const episode = isEpisode(item);
+    const back15 = () => skip(-15_000);
+    const fwd15 = () => skip(15_000);
     set('play', resume);
     set('pause', pause);
-    // Episodes get ±15s; queued songs get previous/next (lock screens show one or the other).
-    set('seekbackward', episode ? () => skip(-15_000) : null);
-    set('seekforward', episode ? () => skip(15_000) : null);
+    // Episodes get ±15s; queued songs get previous/next.
+    set('seekbackward', episode ? back15 : null);
+    set('seekforward', episode ? fwd15 : null);
     set('seekto', d => seek(d.seekTime * 1000));
-    set('previoustrack', !episode && queue ? prev : null);
-    set('nexttrack', !episode && queue ? next : null);
+    // Android's lock screen only has previous/next slots (Chrome's seek actions don't appear
+    // there), so for episodes those buttons skip ±15s. iOS shows real ±15s buttons from the
+    // seek actions, and would swap them for track buttons if these were set.
+    const trackSkip = episode && !IS_IOS;
+    set('previoustrack', trackSkip ? back15 : !episode && queue ? prev : null);
+    set('nexttrack', trackSkip ? fwd15 : !episode && queue ? next : null);
   }, [item, queue, resume, pause, skip, seek, prev, next]);
 
   useEffect(() => {
