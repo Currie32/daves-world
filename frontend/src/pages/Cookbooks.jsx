@@ -628,7 +628,10 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
   }
 
   useEffect(() => {
+    // Mobile chips live outside containerRef; closing on their mousedown would
+    // unmount them before the click lands, so only the desktop overlay uses this.
     function handleClickOutside(e) {
+      if (isMobile) return;
       if (containerRef.current && !containerRef.current.contains(e.target)) {
         setShowDropdown(false);
       }
@@ -642,7 +645,7 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
     };
-  }, []);
+  }, [isMobile]);
 
   const hasFilters = selectedFilters.length > 0;
   const hasQuery = query.trim().length > 0;
@@ -774,6 +777,8 @@ function CookbookIndex({ onSelectBook, allRecipes, userPrefs, savePrefs }) {
             <button
               key={`${s.type}:${s.value}`}
               onMouseEnter={() => setHighlightedIndex(i)}
+              // Keep focus (and the keyboard) on the search input so more filters can be added.
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => addFilter(s)}
               style={{
                 flexShrink: 0,
