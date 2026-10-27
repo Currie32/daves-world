@@ -351,3 +351,144 @@ export async function recommendSongs({ token, onProgress, dismissed = { ids: [],
   debug.recommended = sections.reduce((n, s) => n + s.recs.length, 0);
   return { sections, debug };
 }
+
+// ─── Playlist ────────────────────────────────────────────────────────────────
+//
+// 20 new songs you're most likely to enjoy. The best predictor for an unheard song
+// is that you already listen to its artist a lot, so most come from your favourite
+// artists' popular songs you haven't played or liked; the rest are songs by new
+// artists in your strongest genres. Only search is used (Development Mode blocks
+// artist top tracks, related artists and recommendations).
+
+const PLAYLIST_SIZE = 20;
+const FAV_ARTISTS = 12;            // artists whose songs are searched (2 pages each)
+const GENRE_ARTISTS = 60;          // artists looked up for genres (kids filter + buckets)
+const DISCOVERY_BUCKETS = 3;
+const DISCOVERY_GENRES = 2;        // micro-genres searched per bucket
+const MAX_PER_ARTIST = 2;
+const RECENT_RELEASE_MS = 180 * 86_400_000;
+const NOT_A_SONG = /karaoke|instrumental|sped up|slowed|8d audio|commentary|interview|tribute to|in the style of/i;
+
+// Spotify's popularity when present, else the search rank (results come most popular first).
+function popularity(t, rank) {
+  return Number.isFinite(t.popularity) ? t.popularity : Math.max(10, 90 - rank * 4);
+}
+
+// Keep same-artist songs apart: greedily take the best-scored song whose artist differs
+// from the previous one.
+function spreadArtists(picks) {
+  const left = [...picks];
+  const out = [];
+  while (left.length) {
+    const prev = out[out.length - 1]?.artistId;
+    const i = left.findIndex(p => p.artistId !== prev);
+    out.push(...left.splice(i >= 0 ? i : 0, 1));
+  }
+  return out;
+}
+
+// Returns { tracks: [{ ...track, _note }], debug }; `dismissed` as for recommendSongs.
+export async function buildPlaylist({ token, onProgress, dismissed = { ids: [], keys: [] } }) {
+  const debug = { errors: [], queries: [] };
+
+  onProgress?.('Reading your liked songs and listening history…');
+  const library = await loadLibrary(token, debug).catch(e => { debug.errors.push(`liked songs: ${e.status || ''} ${e.message}`); return []; });
+  const history = (await loadHistory(token, library, debug.errors)).filter(p => !isKidsTrack(p.track));
+  const topArtists = await spGet('/me/top/artists?time_range=medium_term&limit=30', token)
+    .catch(e => { debug.errors.push(`top artists: ${e.status || ''} ${e.message}`); return null; });
+
+  // How much you listen to each artist: recent plays and top tracks (as for song recs),
+  // your top artists over ~6 months, and a little for every liked song.
+  const weights = new Map();
+  const add = (a, w) => {
+    if (!a?.id) return;
+    const cur = weights.get(a.id) || { id: a.id, name: a.name, weight: 0 };
+    cur.weight += w;
+    weights.set(a.id, cur);
+  };
+  history.forEach(({ track, weight }) => track.artists?.forEach(a => add(a, weight / track.artists.length)));
+  (topArtists?.items || []).forEach((a, i) => add(a, 6 * (30 - i) / 30));
+  library.forEach(({ track }) => track.artists?.forEach(a => add(a, 0.3 / track.artists.length)));
+  const artists = [...weights.values()].sort((a, b) => b.weight - a.weight);
+  debug.artists = artists.length;
+  if (!artists.length) return { tracks: [], debug };
+
+  onProgress?.('Working out what you like…');
+  const looked = artists.slice(0, GENRE_ARTISTS);
+  const info = await loadArtistGenres(token, looked, debug);
+  const kidsArtists = new Set([...info].filter(([, v]) => v.bucket === KIDS).map(([id]) => id));
+  const adults = looked.filter(a => !kidsArtists.has(a.id));
+  if (!adults.length) return { tracks: [], debug };
+  const maxWeight = adults[0].weight;
+
+  // Strongest genre buckets and their most common micro-genres, for discovery.
+  const buckets = new Map();
+  for (const a of adults) {
+    const v = info.get(a.id);
+    if (!v.bucket) continue;
+    const b = buckets.get(v.bucket) || { name: v.bucket, weight: 0, micro: new Map() };
+    b.weight += a.weight;
+    if (!v.itunes) v.genres.filter(g => bucketOf(g) === v.bucket).forEach(g => b.micro.set(g, (b.micro.get(g) || 0) + a.weight));
+    buckets.set(v.bucket, b);
+  }
+  const topBuckets = [...buckets.values()].sort((a, b) => b.weight - a.weight).slice(0, DISCOVERY_BUCKETS);
+
+  // Songs never to pick: anything played or liked (any version), or dismissed.
+  const knownTracks = new Set([...history.map(p => p.track.id), ...library.map(i => i.track.id), ...dismissed.ids]);
+  const knownSongs = new Set([...history.map(p => p.track), ...library.map(i => i.track)].flatMap(songKeys));
+  dismissed.keys.forEach(k => knownSongs.add(k));
+  const heardArtists = new Set(artists.map(a => a.id));
+
+  const fav = adults.slice(0, FAV_ARTISTS);
+  onProgress?.(`Finding songs by ${fav.slice(0, 3).map(a => a.name).join(', ')} and others…`);
+  const plan = [
+    ...fav.flatMap(a => [0, 10].map(offset => ({ kind: 'fav', artist: a, q: `artist:"${a.name}"`, offset }))),
+    ...topBuckets.flatMap(b => {
+      const micro = [...b.micro].sort((x, y) => y[1] - x[1]).slice(0, DISCOVERY_GENRES).map(([g]) => g);
+      return (micro.length ? micro : (BUCKET_QUERIES[b.name] || []).slice(0, DISCOVERY_GENRES))
+        .map(g => ({ kind: 'new', bucket: b, q: `genre:"${g}"`, offset: Math.floor(Math.random() * 5) * 10 }));
+    }),
+  ];
+  const results = await mapLimit(plan, 3, p => searchTracks(token, p.q, p.offset, debug));
+
+  const now = Date.now();
+  const candidates = new Map(); // track id → { track, score, artistId, note }
+  const consider = (t, score, artistId, note) => {
+    if (!t?.id || knownTracks.has(t.id) || isKidsTrack(t) || NOT_A_SONG.test(t.name)) return;
+    if ((t.artists || []).some(a => kidsArtists.has(a.id))) return;
+    if (songKeys(t).some(k => knownSongs.has(k))) return;
+    const cur = candidates.get(t.id);
+    if (cur) { cur.score = Math.max(cur.score, score) * 1.1; return; } // found twice: a bit more likely
+    candidates.set(t.id, { track: t, score, artistId, note });
+  };
+  plan.forEach((p, i) => (results[i] || []).forEach((t, rank) => {
+    const pop = popularity(t, p.offset + rank) / 100;
+    if (p.kind === 'fav') {
+      if (!(t.artists || []).some(a => a.id === p.artist.id)) return; // a different artist with that name
+      const recent = now - new Date(t.album?.release_date || 0).getTime() < RECENT_RELEASE_MS;
+      consider(t, (p.artist.weight / maxWeight) ** 0.6 * (0.35 + 0.65 * pop) * (recent ? 1.15 : 1),
+        p.artist.id, `More from ${p.artist.name}`);
+    } else {
+      if ((t.artists || []).some(a => heardArtists.has(a.id))) return; // new artists only
+      const share = p.bucket.weight / topBuckets[0].weight;
+      consider(t, 0.5 * share ** 0.5 * (0.35 + 0.65 * pop), t.artists?.[0]?.id, `New artist · ${p.bucket.name}`);
+    }
+  }));
+  debug.candidates = candidates.size;
+
+  // Best first, at most MAX_PER_ARTIST per artist (one for new artists), one version of each song.
+  const perArtist = new Map();
+  const titles = new Set();
+  const picks = [];
+  for (const c of [...candidates.values()].sort((a, b) => b.score - a.score)) {
+    const cap = c.note.startsWith('New artist') ? 1 : MAX_PER_ARTIST;
+    const title = songKeys(c.track)[0];
+    if ((perArtist.get(c.artistId) || 0) >= cap || titles.has(title)) continue;
+    perArtist.set(c.artistId, (perArtist.get(c.artistId) || 0) + 1);
+    titles.add(title);
+    picks.push(c);
+    if (picks.length >= PLAYLIST_SIZE) break;
+  }
+  debug.picked = picks.length;
+  return { tracks: spreadArtists(picks).map(c => ({ ...c.track, _note: c.note })), debug };
+}

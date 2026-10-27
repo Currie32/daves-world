@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from 'react';
-import { startAuth, completeAuth, getToken, clearTokens, spGet } from '../lib/spotify';
-import { recommendSongs, songKeys } from '../lib/musicRecs';
+import { startAuth, completeAuth, getToken, clearTokens, spGet, spSend } from '../lib/spotify';
+import { recommendSongs, buildPlaylist, songKeys } from '../lib/musicRecs';
 import { doc, getDoc, setDoc, arrayUnion } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { cleanDescription } from '../lib/podcastText';
 import { useSpotifyWebPlayer, embedHeight, isEpisode, RATES } from '../lib/useSpotifyWebPlayer';
 import { findEpisodeAudio, forgetEpisodeAudio } from '../lib/podcastFeed';
-import PlaylistTab from './BetterSpotifyPlaylist';
 
 // Better Spotify uses its own Spotify app ("music-box"), not the default VITE_SPOTIFY_CLIENT_ID one.
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_BETTER_CLIENT_ID || '';
@@ -360,6 +360,67 @@ function imageUrl(images, minWidth = 64) {
 // What's in the player, so list rows can show pause on the playing item and toggle it.
 const NowPlaying = createContext({ uri: null, playing: false, toggle: () => {} });
 
+// Liked Songs on Spotify: the hearts on song rows and in the player save/remove the song.
+const Likes = createContext({ isLiked: () => false, toggle: () => {}, check: () => {} });
+
+function useSpotifyLikes() {
+  const [liked, setLiked] = useState(() => new Set());
+  const [error, setError] = useState('');
+  const likedRef = useRef(liked);
+  useEffect(() => { likedRef.current = liked; }, [liked]);
+  const checked = useRef(new Set());
+  const mark = (ids, on) => setLiked(prev => {
+    const next = new Set(prev);
+    ids.forEach(id => { if (on) next.add(id); else next.delete(id); });
+    return next;
+  });
+
+  const toggle = useCallback(async track => {
+    if (!track?.id) return;
+    const on = !likedRef.current.has(track.id);
+    mark([track.id], on); // optimistic; undone if Spotify refuses
+    setError('');
+    try {
+      await spSend(on ? 'PUT' : 'DELETE', `/me/tracks?ids=${track.id}`, await freshToken());
+    } catch (e) {
+      mark([track.id], !on);
+      setError(e.status === 401 || e.status === 403
+        ? 'Spotify didn’t allow that. Disconnect and connect again so Dave’s World can change your Liked Songs.'
+        : `Couldn’t update your Liked Songs: ${e.message}`);
+    }
+  }, []);
+
+  // Ask Spotify which of these songs are already liked (each song once).
+  const check = useCallback(async ids => {
+    const todo = [...new Set(ids)].filter(id => id && !checked.current.has(id)).slice(0, 50);
+    if (!todo.length) return;
+    todo.forEach(id => checked.current.add(id));
+    try {
+      const res = await spGet(`/me/tracks/contains?ids=${todo.join(',')}`, await freshToken());
+      mark(todo.filter((_, i) => res?.[i]), true);
+    } catch {
+      todo.forEach(id => checked.current.delete(id));
+    }
+  }, []);
+
+  const value = useMemo(() => ({ isLiked: id => liked.has(id), toggle, check }), [liked, toggle, check]);
+  return { value, error, clearError: () => setError('') };
+}
+
+function LikeButton({ track, size = 18, style }) {
+  const likes = useContext(Likes);
+  if (!track?.id || isEpisode(track)) return null;
+  const on = likes.isLiked(track.id);
+  return (
+    <button style={{ ...s.likeBtn, ...(on ? s.likeBtnOn : {}), ...style }} aria-pressed={on}
+      onClick={e => { e.stopPropagation(); likes.toggle(track); }}
+      title={on ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
+      aria-label={on ? `Remove ${track.name} from Liked Songs` : `Save ${track.name} to Liked Songs`}>
+      <HeartIcon size={size} filled={on} />
+    </button>
+  );
+}
+
 // Row click: play the item, or pause/resume it if it's already in the player.
 function useRowPlayback(item, onPlay) {
   const np = useContext(NowPlaying);
@@ -374,15 +435,31 @@ function useRowPlayback(item, onPlay) {
   };
 }
 
+// Previews longer than this get a Show more link (the preview is one line; a phone-width
+// line holds about 40 characters).
+const DESC_PREVIEW_CHARS = 40;
+
 function EpisodeRow({ ep, onPlay }) {
   const row = useRowPlayback(ep, onPlay);
+  const [expanded, setExpanded] = useState(false);
   const resume = ep.resume_point;
   const played = resume?.fully_played;
   const progress = !played && resume?.resume_position_ms > 0 ? resume.resume_position_ms / ep.duration_ms : 0;
   const remaining = progress ? ep.duration_ms - resume.resume_position_ms : 0;
+  // Sponsor reads, links and "follow us" lines removed; saved episodes keep 1,500 characters.
+  const desc = useMemo(() => cleanDescription(ep.description, 1500), [ep.description]);
+  // The whole card plays (it's a grid, so the description follows the text directly rather
+  // than the taller artwork); Show more/less don't.
+  const onKey = e => {
+    if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    row.onClick();
+  };
+  const toggle = open => e => { e.stopPropagation(); setExpanded(open); };
   return (
-    <button style={s.episode(played)} onClick={row.onClick} title={row.title}>
-      <img src={imageUrl(ep.images) || imageUrl(ep._show.images)} alt="" style={s.epArt} />
+    <div style={s.episode(played)} role="button" tabIndex={0} onClick={row.onClick} onKeyDown={onKey} title={row.title}>
+      <img src={imageUrl(ep.images) || imageUrl(ep._show.images)} alt=""
+        style={desc ? { ...s.epArt, ...s.epArtSpan } : s.epArt} />
       <div style={s.epBody}>
         <div style={s.epShow}>{ep._show.name}</div>
         <div style={s.epTitle}>{ep.name}</div>
@@ -397,7 +474,20 @@ function EpisodeRow({ ep, onPlay }) {
         )}
       </div>
       <span style={row.active ? { ...s.playIcon, ...s.playIconActive } : s.playIcon}>{row.icon}</span>
-    </button>
+      {desc && (desc.length <= DESC_PREVIEW_CHARS ? (
+        <p style={{ ...s.epDescText, ...s.epDesc }}>{desc}</p>
+      ) : expanded ? (
+        <p style={{ ...s.epDescText, ...s.epDesc }}>
+          {desc}{' '}
+          <button style={s.moreBtn} onClick={toggle(false)} aria-expanded>Show less</button>
+        </p>
+      ) : (
+        <div style={{ ...s.epDesc, ...s.epDescLine }}>
+          <p style={{ ...s.epDescText, ...s.epDescClamped }}>{desc}</p>
+          <button style={s.moreBtn} onClick={toggle(true)} aria-expanded={false}>Show more</button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -557,6 +647,22 @@ function PlayerBar({ player, mobile }) {
     return () => clearInterval(id);
   }, [playing]);
 
+  // Show whether the playing song is already in your Liked Songs.
+  const { check: checkLiked } = useContext(Likes);
+  const songId = item && !isEpisode(item) ? item.id : null;
+  useEffect(() => { if (songId) checkLiked([songId]); }, [songId, checkLiked]);
+
+  // Briefly darken the ±15s button that was tapped, so the tap registers visibly.
+  const [flash, setFlash] = useState(0); // -1 | 1 | 0
+  const flashTimer = useRef(null);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+  const skipBy = deltaMs => {
+    skip(deltaMs);
+    setFlash(Math.sign(deltaMs));
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(0), 180);
+  };
+
   // The bar is fixed, so reserve its height at the end of the page to keep content reachable.
   const barRef = useRef(null);
   const [barHeight, setBarHeight] = useState(0);
@@ -582,8 +688,9 @@ function PlayerBar({ player, mobile }) {
   const qi = queue ? queue.findIndex(t => t.uri === item.uri) : -1;
 
   const skipStyle = mobile ? s.mSkipBtn : s.skipBtn;
-  const back15 = episode && <button style={skipStyle} onClick={() => skip(-15_000)} aria-label="Back 15 seconds">−15s</button>;
-  const fwd15 = episode && <button style={skipStyle} onClick={() => skip(15_000)} aria-label="Forward 15 seconds">+15s</button>;
+  const skipBtnStyle = dir => ({ ...skipStyle, ...s.skipFlashable, ...(flash === dir ? s.skipFlashed : {}) });
+  const back15 = episode && <button style={skipBtnStyle(-1)} onClick={() => skipBy(-15_000)} aria-label="Back 15 seconds">−15s</button>;
+  const fwd15 = episode && <button style={skipBtnStyle(1)} onClick={() => skipBy(15_000)} aria-label="Forward 15 seconds">+15s</button>;
   const iconSize = mobile ? 22 : 14;
   const prevBtn = qi >= 0 && (
     <button style={{ ...skipStyle, opacity: qi === 0 ? 0.4 : 1 }} onClick={prev} disabled={qi === 0} aria-label="Previous track"><PrevIcon size={iconSize} /></button>
@@ -606,6 +713,7 @@ function PlayerBar({ player, mobile }) {
     </>
   );
   const speedBtn = source === 'audio' && <SpeedMenu rate={rate} setRate={setRate} />;
+  const likeBtn = !episode && <LikeButton track={item} size={mobile ? 22 : 16} />;
   const openLink = <a href={openUrl} target="_blank" rel="noreferrer" style={s.openLink}>Open in Spotify</a>;
   const closeBtn = <button style={s.closeBtn} onClick={close} aria-label="Close player"><CloseIcon size={mobile ? 20 : 14} /></button>;
   const embedBox = <div ref={embedElRef} style={{ ...s.embedBox, height: embedHeight(item, mobile) }} />;
@@ -649,6 +757,7 @@ function PlayerBar({ player, mobile }) {
         {showEmbed
           ? <span style={s.embedSkips}>{back15}{fwd15}{prevBtn}{nextBtn}</span>
           : status && !live ? <span style={{ ...s.playerTime, flex: 1 }}>{status}</span> : seekRow}
+        {likeBtn}
         {speedBtn}
         {openLink}
         {closeBtn}
@@ -661,7 +770,7 @@ function PlayerBar({ player, mobile }) {
       <div style={{ height: barHeight }} />
       <div ref={barRef} style={mobile ? { ...s.playerBar, ...s.mPlayerBar } : s.playerBar}>
         <div style={mobile ? s.mInner : s.playerInner}>
-          {mobile && <div style={s.mHead}>{openLink}<span style={s.mHeadRight}>{speedBtn}{closeBtn}</span></div>}
+          {mobile && <div style={s.mHead}>{openLink}<span style={s.mHeadRight}>{likeBtn}{speedBtn}{closeBtn}</span></div>}
           {error && <div style={s.playerError}>{error}</div>}
           {main}
           {foot}
@@ -916,6 +1025,16 @@ async function syncDismissed(uid) {
   return merged;
 }
 
+// X on a song: never recommend it again (this browser, and the account when signed in).
+function rememberDismissed(track, uid) {
+  const d = readDismissed();
+  const keys = songKeys(track);
+  d.ids.push(track.id);
+  d.keys.push(...keys);
+  writeDismissed(d);
+  if (uid) pushDismissed(uid, [track.id], keys).catch(() => { /* synced next load */ });
+}
+
 function withoutDismissed(result, d) {
   if (!result) return result;
   const ids = new Set(d.ids), keys = new Set(d.keys);
@@ -928,7 +1047,8 @@ function withoutDismissed(result, d) {
   };
 }
 
-function TrackRow({ track, onPlay, onDismiss }) {
+// note: replaces the album/year line (e.g. why a playlist song was picked).
+function TrackRow({ track, onPlay, onDismiss, note }) {
   const row = useRowPlayback(track, onPlay);
   return (
     <div style={s.trackRow}>
@@ -938,13 +1058,18 @@ function TrackRow({ track, onPlay, onDismiss }) {
           <div style={s.trackTitle}>{track.name}</div>
           <div style={s.trackArtist}>{track.artists.map(a => a.name).join(', ')}</div>
           <div style={s.epMeta}>
-            <span style={s.trackAlbum}>{track.album?.name}</span>
-            <span>·</span>
-            <span>{track.album?.release_date?.slice(0, 4)}</span>
+            {note ? <span style={s.trackAlbum}>{note}</span> : (
+              <>
+                <span style={s.trackAlbum}>{track.album?.name}</span>
+                <span>·</span>
+                <span>{track.album?.release_date?.slice(0, 4)}</span>
+              </>
+            )}
           </div>
         </div>
         <span style={row.active ? { ...s.playIcon, ...s.playIconActive } : s.playIcon}>{row.icon}</span>
       </button>
+      <LikeButton track={track} style={s.rowLikeBtn} />
       <button style={s.dismissBtn} onClick={() => onDismiss(track)}
         title="Never recommend this song" aria-label={`Never recommend ${track.name}`}>
         <CloseIcon />
@@ -953,8 +1078,8 @@ function TrackRow({ track, onPlay, onDismiss }) {
   );
 }
 
-// Music: sub-tabs for song recommendations and the playlist generator.
-function MusicTab({ view, setView, onPlay, player }) {
+// Music: sub-tabs for song recommendations and the playlist.
+function MusicTab({ view, setView, onPlay }) {
   return (
     <>
       <div style={s.subTabBar}>
@@ -966,9 +1091,7 @@ function MusicTab({ view, setView, onPlay, player }) {
           ))}
         </div>
       </div>
-      {view === 'playlist'
-        ? <PlaylistTab getToken={freshToken} player={player} onPlay={onPlay} />
-        : <SongRecsView onPlay={onPlay} />}
+      {view === 'playlist' ? <PlaylistView onPlay={onPlay} /> : <SongRecsView onPlay={onPlay} />}
     </>
   );
 }
@@ -1023,12 +1146,7 @@ function SongRecsView({ onPlay }) {
 
   // Remember the song so it's never recommended again, and drop it from the saved results.
   const dismiss = useCallback(track => {
-    const d = readDismissed();
-    const keys = songKeys(track);
-    d.ids.push(track.id);
-    d.keys.push(...keys);
-    writeDismissed(d);
-    if (uidRef.current) pushDismissed(uidRef.current, [track.id], keys).catch(() => { /* synced next load */ });
+    rememberDismissed(track, uidRef.current);
     setResult(prev => {
       if (!prev) return prev;
       const next = {
@@ -1044,6 +1162,11 @@ function SongRecsView({ onPlay }) {
       return next;
     });
   }, []);
+
+  const { check: checkLiked } = useContext(Likes);
+  useEffect(() => {
+    if (result?.sections?.length) checkLiked(result.sections.flatMap(sec => sec.recs.map(t => t.id)));
+  }, [result, checkLiked]);
 
   const busy = !result && !error;
   const header = (
@@ -1081,6 +1204,126 @@ function SongRecsView({ onPlay }) {
           </section>
         ))
       )}
+    </>
+  );
+}
+
+// ─── Playlist ────────────────────────────────────────────────────────────────
+
+// 20 new songs you're most likely to enjoy (lib/musicRecs.js buildPlaylist). Built
+// automatically, kept for a week or until "New playlist".
+const PLAYLIST_KEY = 'bs_playlist_v2';
+const PLAYLIST_TTL = 7 * 86_400_000;
+try { localStorage.removeItem('bs_playlist_v1'); } catch { /* old generator's saved form */ }
+let playlistInFlight = null;
+
+const trimPlaylistTrack = t => ({
+  id: t.id, uri: t.uri, name: t.name, duration_ms: t.duration_ms, external_urls: t.external_urls,
+  artists: (t.artists || []).map(a => ({ id: a.id, name: a.name })),
+  album: { name: t.album?.name, release_date: t.album?.release_date, images: t.album?.images || [] },
+  _note: t._note,
+});
+
+function readPlaylist() {
+  try {
+    const c = JSON.parse(localStorage.getItem(PLAYLIST_KEY) || 'null');
+    if (c && Date.now() - c.at < PLAYLIST_TTL && c.tracks?.length) return c;
+  } catch { /* ignore */ }
+  return null;
+}
+
+function writePlaylist(p) {
+  try { localStorage.setItem(PLAYLIST_KEY, JSON.stringify(p)); } catch { /* quota */ }
+}
+
+function PlaylistView({ onPlay }) {
+  const [saved, setSaved] = useState(readPlaylist); // { at, tracks }
+  const [progress, setProgress] = useState('');
+  const [error, setError] = useState('');
+  const { user, loading: authLoading } = useAuth();
+  const uidRef = useRef(null);
+  const savedRef = useRef(saved);
+  useEffect(() => { savedRef.current = saved; }, [saved]);
+
+  const run = useCallback(async () => {
+    setError(''); setSaved(null); setProgress('Starting…');
+    try {
+      if (!playlistInFlight) {
+        playlistInFlight = (async () => {
+          const uid = uidRef.current;
+          const dismissed = uid ? await syncDismissed(uid).catch(() => readDismissed()) : readDismissed();
+          const { tracks } = await buildPlaylist({ token: await freshToken(), onProgress: setProgress, dismissed });
+          const out = { at: Date.now(), tracks: tracks.map(trimPlaylistTrack) };
+          if (out.tracks.length) writePlaylist(out);
+          return out;
+        })().finally(() => { playlistInFlight = null; });
+      }
+      setSaved(await playlistInFlight);
+    } catch (e) {
+      setError(e.message || 'Could not build a playlist.');
+    } finally {
+      setProgress('');
+    }
+  }, []);
+
+  // Once sign-in state is known: drop songs dismissed on other devices, then build a
+  // playlist if there isn't a saved one.
+  useEffect(() => {
+    if (authLoading) return;
+    uidRef.current = user?.uid || null;
+    let cancelled = false;
+    (async () => {
+      if (user && savedRef.current) {
+        try {
+          const d = await syncDismissed(user.uid);
+          const ids = new Set(d.ids), keys = new Set(d.keys);
+          if (!cancelled) setSaved(prev => prev && { ...prev, tracks: prev.tracks.filter(t => !ids.has(t.id) && !songKeys(t).some(k => keys.has(k))) });
+        } catch { /* offline: use this browser's list */ }
+      }
+      if (!cancelled && !savedRef.current) run();
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user?.uid]);
+
+  const dismiss = useCallback(track => {
+    rememberDismissed(track, uidRef.current);
+    setSaved(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, tracks: prev.tracks.filter(t => t.id !== track.id) };
+      writePlaylist(next);
+      return next;
+    });
+  }, []);
+
+  const tracks = saved?.tracks;
+  const { check: checkLiked } = useContext(Likes);
+  useEffect(() => { if (tracks?.length) checkLiked(tracks.map(t => t.id)); }, [tracks, checkLiked]);
+  // Playing any song carries on through the rest of the playlist.
+  const playFrom = useCallback(t => onPlay(t, tracks), [onPlay, tracks]);
+  const busy = !saved && !error;
+
+  const header = (
+    <div style={s.subTabBar}>
+      <p style={{ ...s.sectionSub, margin: 0, flex: 1 }}>
+        New songs you’re likely to enjoy: ones you haven’t played by the artists you listen to most, plus a few new artists in your favourite genres.
+      </p>
+      <button style={s.linkBtn} onClick={run} disabled={busy}>{busy ? 'Working…' : 'New playlist'}</button>
+    </div>
+  );
+
+  if (error) return <>{header}<div style={s.error}>{error} <button style={s.linkBtn} onClick={run}>Retry</button></div></>;
+  if (!saved) return <>{header}<div style={s.muted}>{progress || 'Working…'}</div></>;
+  if (!tracks.length) return <>{header}<div style={s.muted}>Couldn’t build a playlist this time — try New playlist.</div></>;
+  return (
+    <>
+      {header}
+      <button style={s.playAllBtn} onClick={() => onPlay(tracks[0], tracks)}>
+        <PlayIcon size={12} /> Play all <span style={s.playAllCount}>{tracks.length} songs</span>
+      </button>
+      <div style={s.list}>
+        {tracks.map(t => <TrackRow key={t.id} track={t} note={t._note} onPlay={playFrom} onDismiss={dismiss} />)}
+      </div>
     </>
   );
 }
@@ -1139,6 +1382,7 @@ export default function BetterSpotify() {
     playing: !!nowItem && (nowSource === 'resolving' || (nowState?.uri === nowItem.uri && !nowState.paused)),
     toggle: togglePlay,
   }), [nowItem, nowState, nowSource, togglePlay]);
+  const likes = useSpotifyLikes();
 
   useEffect(() => {
     (async () => {
@@ -1210,11 +1454,18 @@ export default function BetterSpotify() {
         ))}
       </div>
 
-      <NowPlaying.Provider value={nowPlaying}>
-        {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
-        {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} player={player} />}
-      </NowPlaying.Provider>
-      <PlayerBar player={player} mobile={mobile} />
+      <Likes.Provider value={likes.value}>
+        {likes.error && (
+          <div style={{ ...s.error, marginBottom: 16 }}>
+            {likes.error} <button style={s.linkBtn} onClick={likes.clearError}>Dismiss</button>
+          </div>
+        )}
+        <NowPlaying.Provider value={nowPlaying}>
+          {tab === 'podcasts' && <PodcastsTab onPlay={onPlay} />}
+          {tab === 'music' && <MusicTab view={musicView} setView={setMusicView} onPlay={onPlay} />}
+        </NowPlaying.Provider>
+        <PlayerBar player={player} mobile={mobile} />
+      </Likes.Provider>
     </div>
   );
 }
@@ -1233,6 +1484,15 @@ function CloseIcon({ size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
       <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function HeartIcon({ size = 18, filled = false }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+      <path d="M12 20.5s-7.5-4.6-9.3-9.4C1.5 7.7 3.7 4.5 7 4.5c2 0 3.6 1.1 5 3 1.4-1.9 3-3 5-3 3.3 0 5.5 3.2 4.3 6.6-1.8 4.8-9.3 9.4-9.3 9.4z" />
     </svg>
   );
 }
@@ -1329,14 +1589,34 @@ const s = {
     fontSize: 13, fontWeight: 500, padding: 0,
   },
   list: { display: 'flex', flexDirection: 'column', gap: 10 },
+  playAllBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 8, margin: '4px 0 16px',
+    background: '#1DB954', color: '#fff', border: 'none', borderRadius: 100, padding: '9px 18px',
+    fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)',
+  },
+  playAllCount: { fontWeight: 400, opacity: 0.85 },
+  // Grid: artwork | text | play button, with the description under the text (and play
+  // button) column, so it sits right after the text however tall the artwork is.
   episode: played => ({
-    display: 'flex', alignItems: 'center', gap: 14, width: '100%', textAlign: 'left',
+    display: 'grid', gridTemplateColumns: '64px minmax(0, 1fr) auto', columnGap: 14, alignItems: 'center',
+    width: '100%', boxSizing: 'border-box', textAlign: 'left', cursor: 'pointer',
     background: 'var(--color-surface)', border: '1px solid var(--color-border)',
     borderLeft: '4px solid var(--color-accent)', borderRadius: 10, padding: 12,
-    cursor: 'pointer', fontFamily: 'var(--font-body)', color: 'var(--color-text)',
+    fontFamily: 'var(--font-body)', color: 'var(--color-text)',
     opacity: played ? 0.6 : 1,
   }),
+  // Same gap above the description whether it's collapsed or expanded.
+  epDesc: { gridColumn: '2 / 4', margin: '10px 0 0' },
+  epDescLine: { display: 'flex', alignItems: 'flex-start', gap: 6 },
+  epDescText: { margin: 0, fontSize: 13, lineHeight: 1.45, color: 'var(--color-text-muted)', overflowWrap: 'anywhere' },
+  epDescClamped: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  moreBtn: {
+    background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-body)',
+    fontSize: 13, lineHeight: 1.45, fontWeight: 600, color: 'var(--color-accent)', flexShrink: 0, whiteSpace: 'nowrap',
+  },
   epArt: { width: 64, height: 64, borderRadius: 8, objectFit: 'cover', flexShrink: 0, background: 'var(--color-border)' },
+  // With a description, the artwork spans both grid rows so it doesn't push the description down.
+  epArtSpan: { gridRow: '1 / span 2', alignSelf: 'start' },
   epBody: { flex: 1, minWidth: 0 },
   trackRow: {
     display: 'flex', alignItems: 'stretch', background: 'var(--color-surface)',
@@ -1347,6 +1627,12 @@ const s = {
     background: 'none', border: 'none', padding: '12px 4px 12px 12px',
     cursor: 'pointer', fontFamily: 'var(--font-body)', color: 'var(--color-text)',
   },
+  likeBtn: {
+    background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', padding: 4,
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'color 0.15s',
+  },
+  likeBtnOn: { color: '#1DB954' },
+  rowLikeBtn: { padding: '0 6px 0 10px' },
   dismissBtn: {
     background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)',
     padding: '0 14px 0 10px', display: 'flex', alignItems: 'center', flexShrink: 0,
@@ -1417,7 +1703,7 @@ const s = {
     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
   },
   skipBtn: {
-    background: 'none', border: '1px solid var(--color-border)', borderRadius: 100, padding: '4px 8px',
+    backgroundColor: 'transparent', border: '1px solid var(--color-border)', borderRadius: 100, padding: '4px 8px',
     fontSize: 12, fontWeight: 600, cursor: 'pointer', color: 'var(--color-text)', fontFamily: 'var(--font-body)',
   },
   embedSkips: { flex: 1, display: 'flex', gap: 6 },
@@ -1439,6 +1725,8 @@ const s = {
   mBottom: { display: 'flex', flexDirection: 'column', gap: 10 },
   mHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 14 },
   mHeadRight: { display: 'flex', alignItems: 'center', gap: 12 },
+  skipFlashable: { transition: 'background-color 0.3s ease-out' },
+  skipFlashed: { backgroundColor: 'rgba(0,0,0,0.14)', transition: 'background-color 0.08s ease-in' },
   speedWrap: { position: 'relative', flexShrink: 0, display: 'inline-flex' },
   speedBtn: {
     background: 'none', border: 'none', padding: '4px 2px', cursor: 'pointer',
@@ -1466,7 +1754,7 @@ const s = {
     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0,
   },
   mSkipBtn: {
-    width: 52, height: 52, borderRadius: '50%', border: '1px solid var(--color-border)', background: 'none',
+    width: 52, height: 52, borderRadius: '50%', border: '1px solid var(--color-border)', backgroundColor: 'transparent',
     display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0,
     fontSize: 16, fontWeight: 600, color: 'var(--color-text)', fontFamily: 'var(--font-body)', padding: 0,
   },

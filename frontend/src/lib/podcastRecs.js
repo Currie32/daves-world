@@ -13,6 +13,7 @@
 // same episode never appears in two sections.
 import { spGet } from './spotify';
 import { embed, dot } from './embeddings';
+import { cleanDescription } from './podcastText';
 
 const MAX_SOURCES = 8;
 const ENTITY_QUERIES = 2;
@@ -42,17 +43,6 @@ const NOT_ENTITIES = new Set(`the a an in on at for and but or this that these t
 your his her its their what why how when where who which episode part today plus also then now so if is are
 was were be ep chapter season bonus special live new ad ads sponsored mr mrs ms dr ceo cfo cto founder
 cofounder co-founder president professor author economist director editor host`.split(/\s+/));
-
-const JUNK = /https?:|www\.|\.com\b|\.co\b|@|promo|\bcode\b|sponsor|patreon|subscribe|advertis|privacy|newsletter|follow (us|me|the)|discount|% off|ad ?choices|megaphone|acast|simplecast|omny|art19|libsyn|learn more|sign up|free trial|support (the|this|our)|leave (a|us) (review|rating)|rate and review|transcript|timestamps|chapters/i;
-
-export function cleanDescription(text, max = 600) {
-  return (text || '')
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map(s => s.trim())
-    .filter(s => s && !JUNK.test(s))
-    .join(' ')
-    .slice(0, max);
-}
 
 const episodeText = ep => `${ep.name}. ${cleanDescription(ep.description)}`;
 

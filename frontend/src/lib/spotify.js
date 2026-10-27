@@ -6,7 +6,7 @@ export const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || '';
 const SCOPES = [
   'streaming', 'user-read-email', 'user-read-private',
   'playlist-modify-public', 'playlist-modify-private',
-  'user-library-read', 'user-read-playback-position',
+  'user-library-read', 'user-library-modify', 'user-read-playback-position',
   'user-read-playback-state', 'user-modify-playback-state',
   'user-read-recently-played', 'user-top-read',
 ].join(' ');
@@ -177,5 +177,20 @@ export async function spGet(path, token) {
     }
   } finally {
     release();
+  }
+}
+
+// PUT/DELETE/POST to the Web API for one-off user actions (not queued like spGet).
+export async function spSend(method, path, token, body) {
+  const res = await fetch(`https://api.spotify.com/v1${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = new Error(err?.error?.message || res.statusText);
+    e.status = res.status;
+    throw e;
   }
 }

@@ -32,7 +32,7 @@ firestore.rules      # Firestore security rules
 | `/sp500-pe` | SP500PE.jsx | Historical S&P 500 P/E, CAPE, and earnings growth charts |
 | `/events` | Events.jsx | Metro Vancouver events browser: search, map, calendar |
 | `/mortgage-calculator` | MortgageCalculator.jsx | Customizable mortgage payoff calculator with charts |
-| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: continue listening, latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded) and the Playlist sub-tab (`BetterSpotifyPlaylist.jsx`, formerly the Playlist Generator page; `/playlist-generator` redirects there); in-page player with play queue (`lib/useSpotifyWebPlayer.js`); podcast episodes play from the show's public RSS feed when found (`lib/podcastFeed.js`), with playback speed and lock-screen controls, else through Spotify |
+| `/better-spotify` | BetterSpotify.jsx | Spotify podcasts: continue listening, latest episodes (14 days), followed shows by latest release, embedding-based recommendations; Music tab: song recs grouped by genre from last-3-months listening (kids' music excluded) and the Playlist sub-tab (20 auto-picked new songs: unheard songs by your most-listened artists plus a few new artists, `buildPlaylist` in `lib/musicRecs.js`; `/playlist-generator` redirects there); hearts save/remove songs in your Spotify Liked Songs; episode rows show a one-line description preview with Show more; in-page player with play queue (`lib/useSpotifyWebPlayer.js`); podcast episodes play from the show's public RSS feed when found (`lib/podcastFeed.js`), with playback speed and lock-screen controls, else through Spotify |
 
 ## Design System
 
