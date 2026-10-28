@@ -9,7 +9,10 @@ import BookFinder from './pages/BookFinder';
 import SP500PE from './pages/SP500PE';
 import Events from './pages/Events';
 import MortgageCalculator from './pages/MortgageCalculator';
+import CityWalkPlanner from './pages/CityWalkPlanner';
+import PriceTracker from './pages/PriceTracker';
 import BetterSpotify from './pages/BetterSpotify';
+import SitesAndBites from './pages/SitesAndBites';
 import Layout from './components/Layout';
 import UpdatePrompt from './components/UpdatePrompt';
 
@@ -32,7 +35,10 @@ export default function App() {
           <Route path="/sp500-pe" element={<SP500PE />} />
           <Route path="/events" element={<Events />} />
           <Route path="/mortgage-calculator" element={<MortgageCalculator />} />
+          <Route path="/city-walk-planner" element={<CityWalkPlanner />} />
+          <Route path="/price-tracker" element={<PriceTracker />} />
           <Route path="/better-spotify" element={<BetterSpotify />} />
+          <Route path="/sites-and-bites" element={<SitesAndBites />} />
         </Routes>
       </Layout>
     </BrowserRouter>

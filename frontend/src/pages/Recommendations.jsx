@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
+import { usePlacesAutocomplete } from '../hooks/usePlacesAutocomplete';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -16,69 +17,6 @@ L.Icon.Default.mergeOptions({
   iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-
-// ─── Google Places Autocomplete Hook ──────────────────────────────────────────
-
-function usePlacesAutocomplete() {
-  const [ready, setReady] = useState(false);
-  const serviceRef = useRef(null);
-
-  useEffect(() => {
-    if (!GOOGLE_MAPS_API_KEY) return;
-    if (window.google?.maps?.places) {
-      serviceRef.current = new window.google.maps.places.AutocompleteService();
-      setReady(true);
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=places`;
-    script.async = true;
-    script.onload = () => {
-      serviceRef.current = new window.google.maps.places.AutocompleteService();
-      setReady(true);
-    };
-    document.head.appendChild(script);
-  }, []);
-
-  const predict = useCallback((input) => {
-    if (!serviceRef.current || !input.trim()) return Promise.resolve([]);
-    return new Promise((resolve) => {
-      serviceRef.current.getPlacePredictions({ input }, (results, status) => {
-        if (status === window.google.maps.places.PlacesServiceStatus.OK && results) {
-          resolve(results);
-        } else {
-          resolve([]);
-        }
-      });
-    });
-  }, []);
-
-  const getDetails = useCallback((placeId) => {
-    return new Promise((resolve) => {
-      const el = document.createElement('div');
-      const svc = new window.google.maps.places.PlacesService(el);
-      svc.getDetails({ placeId, fields: ['geometry', 'formatted_address', 'name', 'url'] }, (place, status) => {
-        if (status === window.google.maps.places.PlacesServiceStatus.OK && place) {
-          resolve({
-            lat: place.geometry.location.lat(),
-            lng: place.geometry.location.lng(),
-            address: place.formatted_address,
-            name: place.name,
-            mapsUrl: place.url,
-          });
-        } else {
-          resolve(null);
-        }
-      });
-    });
-  }, []);
-
-  return { ready, predict, getDetails };
-}
 
 // ─── Map helper: fly to bounds when markers change ────────────────────────────
 
@@ -172,7 +110,7 @@ function RecForm({ onSave, onCancel, places, initial }) {
         <div style={{ ...s.field, position: 'relative' }}>
           <label style={s.label}>Address</label>
           <input style={s.input} value={addressQuery} onChange={e => handleAddressInput(e.target.value)}
-            placeholder={places.ready ? 'Search for a place...' : 'Set Google Maps API key to enable'} disabled={!places.ready} />
+            placeholder="Search for a place..." />
           {suggestions.length > 0 && (
             <ul style={s.suggestions}>
               {suggestions.map(p => (

@@ -72,11 +72,35 @@
     "comingSoon": false
   },
   {
+    "id": "city-walk-planner",
+    "title": "City Walk Planner",
+    "description": "Build an optimized walking route through any city and export it to Google Maps.",
+    "emoji": "🚶",
+    "route": "/city-walk-planner",
+    "comingSoon": false
+  },
+  {
+    "id": "price-tracker",
+    "title": "Price Tracker",
+    "description": "Watch items and get emailed when they get cheaper.",
+    "emoji": "🏷️",
+    "route": "/price-tracker",
+    "comingSoon": false
+  },
+  {
     "id": "better-spotify",
     "title": "Better Spotify",
     "description": "Podcasts, song recommendations and playlists.",
     "emoji": "🎧",
     "route": "/better-spotify",
+    "comingSoon": false
+  },
+  {
+    "id": "sites-and-bites",
+    "title": "Sites and Bites",
+    "description": "A curated must-see guide to any destination: food, drink, culture and views on a map.",
+    "emoji": "🗺️",
+    "route": "/sites-and-bites",
     "comingSoon": false
   }
 ]

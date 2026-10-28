@@ -34,38 +34,40 @@ const POSTER_SIZES = [
 
 const DPI_OPTIONS = [150, 200, 300];
 
+// Each palette is tuned for thin ink on a warm ground: contours are a soft
+// earthy mid-tone (visible but quiet), water is muted, text tracks the trail ink.
 const THEME_PRESETS = {
   'Parchment': {
-    background: '#ebe2d6', trails: '#2a2622', contours: '#d2c6b4',
-    water: '#8ba8b8', text: '#2a2622',
+    background: '#f3ede1', trails: '#453a2e', contours: '#cdbca0',
+    water: '#aebfc4', text: '#453a2e',
+  },
+  'Ivory': {
+    background: '#faf7f0', trails: '#20201d', contours: '#d8cdb8',
+    water: '#bcc9cd', text: '#20201d',
+  },
+  'Sage': {
+    background: '#e6e9de', trails: '#374139', contours: '#bcc3ad',
+    water: '#9fb4ad', text: '#374139',
   },
   'Canyon': {
-    background: '#e0d2b8', trails: '#6b3222', contours: '#ccbea0',
-    water: '#728a78', text: '#4a2418',
+    background: '#f0e2d1', trails: '#6b3a29', contours: '#d0b593',
+    water: '#8b9b87', text: '#472819',
   },
-  'Fern': {
-    background: '#dce8d8', trails: '#1e3320', contours: '#b8ccb0',
-    water: '#6898a8', text: '#1e3320',
+  'Slate': {
+    background: '#e8eaec', trails: '#2e343a', contours: '#c0c6cc',
+    water: '#9aabb4', text: '#2e343a',
   },
-  'Alpine': {
-    background: '#d8e0ea', trails: '#1a2840', contours: '#bcc8d8',
-    water: '#7090b0', text: '#1a2840',
+  'Blueprint': {
+    background: '#1b3b58', trails: '#eef3f6', contours: '#3a6491',
+    water: '#16324a', text: '#eef3f6',
   },
-  'Minimal': {
-    background: '#f8f6f2', trails: '#1a1a1a', contours: '#dcd8d0',
-    water: '#98b8c8', text: '#1a1a1a',
-  },
-  'Forest': {
-    background: '#3d6b4a', trails: '#e8e0cc', contours: '#4e8060',
-    water: '#2a5848', text: '#e8e0cc',
+  'Pine': {
+    background: '#21362b', trails: '#ebe6d4', contours: '#3e5a4a',
+    water: '#1b2c31', text: '#ebe6d4',
   },
   'Midnight': {
-    background: '#212529', trails: '#e0dcd4', contours: '#383e48',
-    water: '#2a4e68', text: '#e0dcd4',
-  },
-  'Copper': {
-    background: '#28201a', trails: '#d0a870', contours: '#40342a',
-    water: '#2a4a42', text: '#d0a870',
+    background: '#1e2126', trails: '#e6e2d8', contours: '#39404b',
+    water: '#273d4d', text: '#e6e2d8',
   },
 };
 
@@ -73,9 +75,36 @@ const DEFAULT_COLORS = THEME_PRESETS['Parchment'];
 
 const TEXT_POSITIONS = ['top', 'bottom', 'none'];
 
+// Difficulty tiers — mountain-bike grading with a hiking fallback.
+// `swatch` is the tint used for the legend header glyph; map markers use the trail ink.
+const DIFFICULTY = {
+  green:  { label: 'Green',        shape: 'circle',  swatch: '#3f7d3f' },
+  blue:   { label: 'Blue',         shape: 'square',  swatch: '#2f5f9f' },
+  black:  { label: 'Black',        shape: 'diamond', swatch: '#1a1a1a' },
+  double: { label: 'Double Black', shape: 'double',  swatch: '#1a1a1a' },
+  other:  { label: 'Trails',       shape: 'dot',     swatch: '#8a8378' },
+};
+const DIFFICULTY_ORDER = ['green', 'blue', 'black', 'double', 'other'];
+
+// Poster band heights as a fraction of the frame — shared by preview overlay and export
+const TOP_BAND = 0.14;      // top strip when a title is shown
+const BOTTOM_BAND = 0.24;   // bottom strip when the trail legend is shown
+const BARE_BAND = 0.035;    // strip with neither
+const SIDE_BAND = 0.045;
+
+// Only the most prominent named trails get a number + legend entry, so the
+// footer stays legible. The rest still draw as unlabelled lines.
+const MAX_LABELED_TRAILS = 38;
+const PER_GROUP_CAP = 14;
+
 // --- Overpass API ---
 
-const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+// Tried in order — the main instance rate-limits and has outages, so fall through to mirrors
+const OVERPASS_URLS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+];
 
 // Approximate distance in meters between two [lon, lat] points
 function haversine([lon1, lat1], [lon2, lat2]) {
@@ -95,6 +124,96 @@ function lineLength(coords) {
     len += haversine(coords[i - 1], coords[i]);
   }
   return len;
+}
+
+// Map OSM tags to a difficulty tier. MTB grading first (IMBA, then mtb:scale),
+// then hiking (sac_scale); unclassified named trails fall through to `other`.
+function classifyDifficulty(tags) {
+  const imba = parseInt(tags['mtb:scale:imba'], 10);
+  if (!Number.isNaN(imba)) {
+    if (imba <= 0) return 'green';
+    if (imba === 1) return 'blue';
+    if (imba === 2) return 'black';
+    return 'double';
+  }
+  const mtb = parseFloat(tags['mtb:scale']);
+  if (!Number.isNaN(mtb)) {
+    if (mtb <= 1) return 'green';
+    if (mtb <= 2) return 'blue';
+    if (mtb <= 4) return 'black';
+    return 'double';
+  }
+  switch (tags['sac_scale']) {
+    case 'hiking': return 'green';
+    case 'mountain_hiking': return 'blue';
+    case 'demanding_mountain_hiking': return 'black';
+    case 'alpine_hiking':
+    case 'demanding_alpine_hiking':
+    case 'difficult_alpine_hiking': return 'double';
+    default: return 'other';
+  }
+}
+
+// Render a small difficulty-shaped marker as ImageData for map.addImage()
+function makeMarkerIcon(shape, ink, size = 48) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const x = c.getContext('2d');
+  const m = size / 2;
+  const r = size * 0.42;
+  x.fillStyle = ink;
+  x.beginPath();
+  if (shape === 'circle') {
+    x.arc(m, m, r, 0, Math.PI * 2);
+  } else if (shape === 'dot') {
+    x.arc(m, m, r * 0.7, 0, Math.PI * 2);
+  } else if (shape === 'square') {
+    x.rect(m - r * 0.92, m - r * 0.92, r * 1.84, r * 1.84);
+  } else if (shape === 'diamond') {
+    x.moveTo(m, m - r); x.lineTo(m + r, m); x.lineTo(m, m + r); x.lineTo(m - r, m); x.closePath();
+  } else if (shape === 'double') {
+    const s = r * 0.72;
+    x.moveTo(m - s, m - s); x.lineTo(m, m); x.lineTo(m - s, m + s); x.lineTo(m - s * 2, m); x.closePath();
+    x.moveTo(m + s, m - s); x.lineTo(m + s * 2, m); x.lineTo(m + s, m + s); x.lineTo(m, m); x.closePath();
+  }
+  x.fill();
+  return x.getImageData(0, 0, size, size);
+}
+
+// (Re)register the four+one difficulty marker images on a map instance
+function addDifficultyIcons(map, colors) {
+  for (const key of DIFFICULTY_ORDER) {
+    const id = `diff-${key}`;
+    const img = makeMarkerIcon(DIFFICULTY[key].shape, colors.trails);
+    if (map.hasImage(id)) map.updateImage(id, img);
+    else map.addImage(id, img, { pixelRatio: 2 });
+  }
+}
+
+function formatDistance(m) {
+  if (m >= 100000) return `${Math.round(m / 1000)} km`;
+  if (m >= 1000) return `${(m / 1000).toFixed(1)} km`;
+  return `${Math.round(m)} m`;
+}
+
+// Draw a difficulty shape glyph on a 2D canvas context (used in the export legend)
+function drawShapeGlyph(ctx, key, cx, cy, r, ink) {
+  const shape = DIFFICULTY[key].shape;
+  ctx.save();
+  ctx.fillStyle = ink;
+  ctx.beginPath();
+  if (shape === 'circle') ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  else if (shape === 'dot') ctx.arc(cx, cy, r * 0.68, 0, Math.PI * 2);
+  else if (shape === 'square') ctx.rect(cx - r * 0.92, cy - r * 0.92, r * 1.84, r * 1.84);
+  else if (shape === 'diamond') {
+    ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
+  } else if (shape === 'double') {
+    const s = r * 0.72;
+    ctx.moveTo(cx - s, cy - s); ctx.lineTo(cx, cy); ctx.lineTo(cx - s, cy + s); ctx.lineTo(cx - s * 2, cy); ctx.closePath();
+    ctx.moveTo(cx + s, cy - s); ctx.lineTo(cx + s * 2, cy); ctx.lineTo(cx + s, cy + s); ctx.lineTo(cx, cy); ctx.closePath();
+  }
+  ctx.fill();
+  ctx.restore();
 }
 
 // --- Union-Find for trail network detection ---
@@ -160,13 +279,27 @@ async function fetchTrails(bounds) {
   const bbox = `${_sw.lat},${_sw.lng},${_ne.lat},${_ne.lng}`;
   const query = `[out:json][timeout:30];(way["highway"~"^(path|track|bridleway)$"]["surface"!~"^(asphalt|concrete|paving_stones|paved)$"](${bbox}););out geom;`;
 
-  const res = await fetch(OVERPASS_URL, {
-    method: 'POST',
-    body: `data=${encodeURIComponent(query)}`,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
-  if (!res.ok) throw new Error(`Overpass error: ${res.status}`);
-  const data = await res.json();
+  let data = null;
+  let lastErr = null;
+  // Two passes over the mirror list — Overpass 504s and rate-limits are often transient
+  for (let attempt = 0; attempt < 2 && !data; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+    for (const url of OVERPASS_URLS) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          body: `data=${encodeURIComponent(query)}`,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+        if (!res.ok) throw new Error(`Overpass error: ${res.status}`);
+        data = await res.json();
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+  }
+  if (!data) throw lastErr || new Error('All Overpass endpoints failed');
 
   const features = data.elements
     .filter((el) => el.type === 'way' && el.geometry && el.geometry.length >= 5)
@@ -177,11 +310,24 @@ async function fetchTrails(bounds) {
         properties: {
           highway: el.tags?.highway || 'path',
           name: el.tags?.name || null,
+          difficulty: classifyDifficulty(el.tags || {}),
           length: Math.round(lineLength(coords)),
         },
         geometry: { type: 'LineString', coordinates: coords },
       };
     });
+
+  // Prominence proxy: total length of all segments sharing a trail name
+  // (unnamed ways just use their own length). Drives the trail fade.
+  const nameTotals = new Map();
+  for (const f of features) {
+    const n = f.properties.name;
+    if (n) nameTotals.set(n, (nameTotals.get(n) || 0) + f.properties.length);
+  }
+  for (const f of features) {
+    const n = f.properties.name;
+    f.properties.prominence = n ? nameTotals.get(n) : f.properties.length;
+  }
 
   return {
     type: 'FeatureCollection',
@@ -197,118 +343,105 @@ function filterTrailsByNetwork(geojson, minNetworkLength) {
   };
 }
 
-function computeTrailStats(geojson, minLen) {
-  if (!geojson) return { count: 0, distance: 0, names: [], labelPoints: [] };
-  const filtered = filterTrailsByNetwork(geojson, minLen);
-  // Aggregate length and collect coordinates per named trail
-  const nameLengths = new Map();
-  const nameCoords = new Map();
-  filtered.features.forEach(f => {
+// Group named trails by difficulty, number them 1..N within each group (longest first),
+// and place one map marker per trail. `inArea` (optional) restricts to the visible poster.
+function buildTrailGroups(features, inArea) {
+  const byName = new Map(); // name -> { length, difficulty, segLen, coords }
+  for (const f of features) {
     const name = f.properties.name;
-    if (!name) return;
-    nameLengths.set(name, (nameLengths.get(name) || 0) + f.properties.length);
-    if (!nameCoords.has(name)) nameCoords.set(name, []);
-    nameCoords.get(name).push(...f.geometry.coordinates);
-  });
-  // Sort by total length descending (popularity proxy)
-  const sorted = [...nameLengths.entries()].sort((a, b) => b[1] - a[1]);
-  const names = sorted.map(e => e[0]);
-  // Compute centroid for each named trail (midpoint of all its coordinates)
-  const labelPoints = names.map((name, i) => {
-    const coords = nameCoords.get(name);
-    const midCoord = coords[Math.floor(coords.length / 2)];
-    return { name, number: i + 1, lon: midCoord[0], lat: midCoord[1] };
-  });
-  const distance = filtered.features.reduce((sum, f) => sum + f.properties.length, 0);
-  return { count: filtered.features.length, distance, names, labelPoints };
+    if (!name) continue;
+    const coords = f.geometry.coordinates;
+    if (inArea && !coords.some(c => inArea(c[0], c[1]))) continue;
+    let rec = byName.get(name);
+    if (!rec) {
+      rec = { length: 0, difficulty: f.properties.difficulty || 'other', segLen: -1, coords };
+      byName.set(name, rec);
+    }
+    rec.length += f.properties.length;
+    if (f.properties.length > rec.segLen) {
+      rec.segLen = f.properties.length;
+      rec.coords = coords;
+      rec.difficulty = f.properties.difficulty || 'other';
+    }
+  }
+
+  // Rank every named trail by length, then pick the most prominent ones — capped
+  // per tier and overall — so the legend fits the footer.
+  const ranked = [...byName.entries()]
+    .map(([name, r]) => ({ name, ...r }))
+    .sort((a, b) => b.length - a.length);
+
+  const chosen = {};
+  DIFFICULTY_ORDER.forEach(k => { chosen[k] = []; });
+  let total = 0;
+  for (const t of ranked) {
+    if (total >= MAX_LABELED_TRAILS) break;
+    const key = t.difficulty || 'other';
+    if (chosen[key].length >= PER_GROUP_CAP) continue;
+    chosen[key].push(t);
+    total += 1;
+  }
+
+  const groups = {};
+  const markers = [];
+  for (const key of DIFFICULTY_ORDER) {
+    const list = chosen[key];
+    if (!list.length) continue;
+    groups[key] = list.map((t, i) => ({ name: t.name, number: i + 1 }));
+    list.forEach((t, i) => {
+      let pt = t.coords[Math.floor(t.coords.length / 2)];
+      if (inArea && !inArea(pt[0], pt[1])) {
+        pt = t.coords.find(c => inArea(c[0], c[1])) || pt;
+      }
+      markers.push({ difficulty: key, number: i + 1, lon: pt[0], lat: pt[1] });
+    });
+  }
+  return { groups, markers, namedCount: byName.size };
 }
 
-// Compute visible-area-aware trail stats and update map labels.
-// Returns updated stats (only trails with segments in the visible poster area).
+function markerFeatures(markers) {
+  return {
+    type: 'FeatureCollection',
+    features: markers.map(mk => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [mk.lon, mk.lat] },
+      properties: { number: String(mk.number), difficulty: mk.difficulty },
+    })),
+  };
+}
+
+function computeTrailStats(geojson, minLen) {
+  if (!geojson) return { count: 0, distance: 0, groups: {}, markers: [] };
+  const filtered = filterTrailsByNetwork(geojson, minLen);
+  const { groups, markers, namedCount } = buildTrailGroups(filtered.features, null);
+  const distance = filtered.features.reduce((sum, f) => sum + f.properties.length, 0);
+  return { count: namedCount, distance, groups, markers };
+}
+
+// Compute visible-area-aware trail stats and refresh the map's difficulty markers.
 function updateLabelsForViewport(map, geojson, minLen, { hasTitle, hasTrails } = {}) {
-  const labelSrc = map?.getSource('trail-labels');
-  if (!labelSrc || !geojson) return null;
+  const markerSrc = map?.getSource('trail-markers');
+  if (!markerSrc || !geojson) return null;
   const container = map.getContainer();
   const w = container.clientWidth, h = container.clientHeight;
-  // Inset bounds to match poster margin overlays + 10px buffer for label radius
-  const buf = 10;
-  const sideInset = w * 0.045 + buf;
-  const topInset = h * (hasTitle ? 0.14 : 0.035) + buf;
-  const bottomInset = h * (hasTrails ? 0.155 : 0.035) + buf;
+  // Inset bounds to match the poster margin overlays + small buffer
+  const buf = 12;
+  const sideInset = w * SIDE_BAND + buf;
+  const topInset = h * (hasTitle ? TOP_BAND : BARE_BAND) + buf;
+  const bottomInset = h * (hasTrails ? BOTTOM_BAND : BARE_BAND) + buf;
   const topLeft = map.unproject([sideInset, topInset]);
   const bottomRight = map.unproject([w - sideInset, h - bottomInset]);
 
-  const inVisibleArea = (lng, lat) =>
+  const inArea = (lng, lat) =>
     lng >= topLeft.lng && lng <= bottomRight.lng &&
     lat <= topLeft.lat && lat >= bottomRight.lat;
 
   const filtered = filterTrailsByNetwork(geojson, minLen);
+  const { groups, markers, namedCount } = buildTrailGroups(filtered.features, inArea);
+  markerSrc.setData(markerFeatures(markers));
 
-  // Build per-name coordinate lists and lengths, but only for visible segments
-  const nameLengths = new Map();
-  const nameVisibleCoords = new Map();
-  filtered.features.forEach(f => {
-    const name = f.properties.name;
-    if (!name) return;
-    const coords = f.geometry.coordinates;
-    const visCoords = coords.filter(c => inVisibleArea(c[0], c[1]));
-    if (visCoords.length === 0) return; // skip trails entirely outside visible area
-    nameLengths.set(name, (nameLengths.get(name) || 0) + f.properties.length);
-    if (!nameVisibleCoords.has(name)) nameVisibleCoords.set(name, []);
-    nameVisibleCoords.get(name).push(...visCoords);
-  });
-
-  // Sort by total length descending and renumber 1..N
-  const sorted = [...nameLengths.entries()].sort((a, b) => b[1] - a[1]);
-  const names = sorted.map(e => e[0]);
-  const labelPoints = names.map((name, i) => {
-    const coords = nameVisibleCoords.get(name);
-    const mid = coords[Math.floor(coords.length / 2)];
-    return { name, number: i + 1, lon: mid[0], lat: mid[1] };
-  });
-
-  // Deconflict labels — skip any that would overlap with an already-placed label
-  const minPxGap = 20; // minimum pixel distance between label centers
-  const placed = [];
-  const features = [];
-  for (const p of labelPoints.slice(0, 24)) {
-    const screenPt = map.project([p.lon, p.lat]);
-    const tooClose = placed.some(sp =>
-      Math.abs(screenPt.x - sp.x) < minPxGap && Math.abs(screenPt.y - sp.y) < minPxGap
-    );
-    if (tooClose) continue;
-    placed.push(screenPt);
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
-      properties: { number: String(p.number) },
-    });
-  }
-  labelSrc.setData({ type: 'FeatureCollection', features });
-
-  // Sort placed labels left-to-right by longitude, renumber 1..N, rebuild features
-  const placedNumbers = new Set(features.map(f => parseInt(f.properties.number)));
-  const placedItems = labelPoints
-    .filter(p => placedNumbers.has(p.number))
-    .sort((a, b) => a.lon - b.lon);
-  const placedNames = [];
-  const placedLabelPoints = [];
-  const renumberedFeatures = placedItems.map((p, i) => {
-    const num = i + 1;
-    placedNames.push(p.name);
-    placedLabelPoints.push({ ...p, number: num });
-    return {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
-      properties: { number: String(num) },
-    };
-  });
-  labelSrc.setData({ type: 'FeatureCollection', features: renumberedFeatures });
-
-  // Compute total distance from ALL filtered features (not just visible)
   const distance = filtered.features.reduce((sum, f) => sum + f.properties.length, 0);
-
-  return { count: filtered.features.length, distance, names: placedNames, labelPoints: placedLabelPoints };
+  return { count: namedCount, distance, groups, markers };
 }
 
 function computeScaleBar(map, containerRef) {
@@ -386,22 +519,22 @@ function buildPosterStyle(baseStyle, colors) {
     data: EMPTY_GEOJSON,
   };
 
-  // GeoJSON source for trail number labels
-  style.sources['trail-labels'] = {
+  // GeoJSON source for numbered difficulty markers
+  style.sources['trail-markers'] = {
     type: 'geojson',
     data: EMPTY_GEOJSON,
   };
 
-  // Waterways — thin, subtle
+  // Waterways — thin, subtle, in the water ink
   style.layers.push({
     id: 'poster-waterways',
     type: 'line',
     source: 'openmaptiles',
     'source-layer': 'waterway',
     paint: {
-      'line-color': colors.trails,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.2, 14, 0.6],
-      'line-opacity': 0.25,
+      'line-color': colors.water,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.2, 14, 0.7],
+      'line-opacity': 0.4,
     },
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   });
@@ -423,8 +556,8 @@ function buildPosterStyle(baseStyle, colors) {
       filter: ['!=', ['get', 'nth_line'], 0],
       paint: {
         'line-color': colors.contours,
-        'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.4, 14, 0.7],
-        'line-opacity': 0.7,
+        'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.35, 14, 0.6],
+        'line-opacity': 0.45,
       },
     }, {
       id: 'contour-lines-index',
@@ -436,54 +569,52 @@ function buildPosterStyle(baseStyle, colors) {
       filter: ['==', ['get', 'nth_line'], 10],
       paint: {
         'line-color': colors.contours,
-        'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 14, 1.3],
-        'line-opacity': 0.85,
+        'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.6, 14, 1.1],
+        'line-opacity': 0.6,
       },
     });
   }
 
-  // Trail lines from GeoJSON source — visible at all zoom levels
+  // Trail lines — one ink, one weight, but faded by prominence so the backbone
+  // trails read strong and minor spurs recede (distinct from the paler contours).
   style.layers.push({
     id: 'poster-trails',
     type: 'line',
     source: 'trails-geojson',
     paint: {
       'line-color': colors.trails,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 0.3, 8, 0.5, 12, 0.9, 16, 1.4],
-      'line-opacity': 0.85,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 0.35, 8, 0.6, 12, 1.0, 16, 1.5],
+      // `to-number` (not `coalesce`) keeps the input number-typed for `interpolate`
+      'line-opacity': [
+        'interpolate', ['linear'],
+        ['to-number', ['get', 'prominence'], ['get', 'length'], 0],
+        150, 0.3,
+        700, 0.5,
+        2000, 0.74,
+        6000, 0.95,
+      ],
     },
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   });
 
-  // Trail number markers
+  // Numbered difficulty markers — icon shape encodes the tier, number matches the legend
   style.layers.push({
-    id: 'trail-label-bg',
-    type: 'circle',
-    source: 'trail-labels',
-    paint: {
-      'circle-radius': 8,
-      'circle-color': colors.background,
-      'circle-stroke-color': colors.trails,
-      'circle-stroke-width': 1,
-      'circle-opacity': 0.7,
-      'circle-stroke-opacity': 0.7,
-    },
-  }, {
-    id: 'trail-label-text',
+    id: 'trail-marker',
     type: 'symbol',
-    source: 'trail-labels',
+    source: 'trail-markers',
     layout: {
-      'text-field': ['get', 'number'],
-      'text-size': 9,
-      'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
-      'text-allow-overlap': true,
-      'text-ignore-placement': true,
+      'icon-image': ['concat', 'diff-', ['get', 'difficulty']],
+      'icon-size': 0.62,
       'icon-allow-overlap': true,
       'icon-ignore-placement': true,
+      'text-field': ['get', 'number'],
+      'text-font': ['Noto Sans Bold'],
+      'text-size': 7.5,
+      'text-allow-overlap': true,
+      'text-ignore-placement': true,
     },
     paint: {
-      'text-color': colors.trails,
-      'text-opacity': 0.7,
+      'text-color': colors.background,
     },
   });
 
@@ -539,19 +670,11 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
     }
   });
 
-  // Build label GeoJSON directly from trailStats so numbers match the legend exactly.
-  // trailStats.names[i] corresponds to number i+1, matching trailStats.labelPoints[i].
-  if (trailStats && trailStats.labelPoints) {
-    exportStyle.sources['trail-labels'] = {
+  // Rebuild difficulty markers from trailStats so map numbers match the legend exactly
+  if (trailStats && trailStats.markers) {
+    exportStyle.sources['trail-markers'] = {
       type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: trailStats.labelPoints.map(p => ({
-          type: 'Feature',
-          geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
-          properties: { number: String(p.number) },
-        })),
-      },
+      data: markerFeatures(trailStats.markers),
     };
   }
   // Copy trail line data from preview map
@@ -563,14 +686,11 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
       if (data) exportStyle.sources['trails-geojson'] = { type: 'geojson', data };
     }
   } catch (e) { /* fallback: export style already has the source from getStyle() */ }
-  // Scale trail label circle radius and text size for export
+  // Scale marker icon + number up for the export resolution
   exportStyle.layers.forEach(layer => {
-    if (layer.id === 'trail-label-bg' && layer.paint) {
-      layer.paint['circle-radius'] = 8 * scale;
-      layer.paint['circle-stroke-width'] = 1 * scale;
-    }
-    if (layer.id === 'trail-label-text' && layer.layout) {
-      layer.layout['text-size'] = 9 * scale;
+    if (layer.id === 'trail-marker' && layer.layout) {
+      layer.layout['icon-size'] = 0.62 * scale;
+      layer.layout['text-size'] = 7.5 * scale;
     }
   });
 
@@ -578,20 +698,21 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
   const previewContainer = map.getContainer();
   const pvW = previewContainer.clientWidth;
   const pvH = previewContainer.clientHeight;
-  const previewTopMargin = textPosition !== 'none' && (title || subtitle) ? 0.14 : 0.035;
-  const previewBottomMargin = trailStats && trailStats.count > 0 ? 0.155 : 0.035;
-  const previewSideMargin = 0.045;
+  const hasTopTitle = textPosition === 'top' && (title || subtitle);
+  const hasLegend = trailStats && trailStats.count > 0;
+  const topFrac = hasTopTitle ? TOP_BAND : BARE_BAND;
+  const bottomFrac = hasLegend ? BOTTOM_BAND : BARE_BAND;
   // Get the geographic bounds of the visible poster area (inside margins)
-  const visibleTopLeft = map.unproject([pvW * previewSideMargin, pvH * previewTopMargin]);
-  const visibleBottomRight = map.unproject([pvW * (1 - previewSideMargin), pvH * (1 - previewBottomMargin)]);
+  const visibleTopLeft = map.unproject([pvW * SIDE_BAND, pvH * topFrac]);
+  const visibleBottomRight = map.unproject([pvW * (1 - SIDE_BAND), pvH * (1 - bottomFrac)]);
   const visibleBounds = [
     [visibleTopLeft.lng, visibleBottomRight.lat],
     [visibleBottomRight.lng, visibleTopLeft.lat],
   ];
   // Export margins in pixels — pad the export map so the visible area matches
-  const exportTopMarginPx = textPosition !== 'none' && (title || subtitle) ? Math.round(pxH * 0.126) : Math.round(pxH * 0.035);
-  const exportBottomMarginPx = trailStats && trailStats.count > 0 ? Math.round(pxH * 0.17) : Math.round(pxH * 0.035);
-  const exportSideMarginPx = Math.round(pxW * 0.045);
+  const exportTopMarginPx = Math.round(pxH * topFrac);
+  const exportBottomMarginPx = Math.round(pxH * bottomFrac);
+  const exportSideMarginPx = Math.round(pxW * SIDE_BAND);
 
   const container = document.createElement('div');
   container.style.cssText = `position:fixed;left:-99999px;top:0;width:${pxW}px;height:${pxH}px;`;
@@ -614,6 +735,7 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
 
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Map render timed out')), 30000);
+      exportMap.once('load', () => addDifficultyIcons(exportMap, colors));
       exportMap.once('idle', () => {
         clearTimeout(timeout);
         resolve();
@@ -630,9 +752,9 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
     ctx.drawImage(mapCanvas, 0, 0, pxW, pxH);
 
     // Draw margin frame (background color strips)
-    const mx = Math.round(pxW * 0.045);
-    const topH = textPosition !== 'none' && (title || subtitle) ? Math.round(pxH * 0.126) : Math.round(pxH * 0.035);
-    const bottomH = trailStats && trailStats.count > 0 ? Math.round(pxH * 0.17) : Math.round(pxH * 0.035);
+    const mx = exportSideMarginPx;
+    const topH = exportTopMarginPx;
+    const bottomH = exportBottomMarginPx;
     ctx.fillStyle = colors.background;
     ctx.fillRect(0, 0, pxW, topH);
     ctx.fillRect(0, pxH - bottomH, pxW, bottomH);
@@ -710,10 +832,10 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
 
     // Title — align top of title with scale bar and compass
     if (textPosition !== 'none' && (title || subtitle)) {
-      const titleSize = Math.round(fontSize * 0.6 * scale);
+      const titleSize = Math.round(fontSize * 0.78 * scale);
       const subtitleSize = Math.round(fontSize * 0.3 * scale);
       // Align top of title text with scale bar line and compass center
-      const titleY = textPosition === 'top' ? scaleY : pxH - Math.round(pxH * 0.07);
+      const titleY = textPosition === 'top' ? scaleY : pxH - Math.round(pxH * 0.09);
 
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
@@ -723,8 +845,8 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
       if (title) {
         ctx.fillStyle = colors.text;
         ctx.font = `700 ${titleSize}px "Playfair Display", serif`;
-        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(titleSize * 0.15)}px`;
-        ctx.fillText(title.toUpperCase(), centerX, titleY);
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(titleSize * 0.28)}px`;
+        ctx.fillText(title.toUpperCase(), centerX + Math.round(titleSize * 0.14), titleY);
         if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
         bottomOfTitle = titleY + titleSize;
       }
@@ -732,73 +854,84 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
       if (subtitle) {
         ctx.fillStyle = colors.text;
         ctx.font = `400 ${subtitleSize}px "DM Sans", sans-serif`;
-        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(subtitleSize * 0.1)}px`;
-        ctx.fillText(subtitle.toUpperCase(), centerX, bottomOfTitle + subtitleSize * 0.3);
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(subtitleSize * 0.24)}px`;
+        ctx.fillText(subtitle.toUpperCase(), centerX + Math.round(subtitleSize * 0.12), bottomOfTitle + subtitleSize * 0.5);
         if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
       }
       ctx.textBaseline = 'alphabetic';
     }
 
-    // Legend
+    // Legend — stat block + difficulty groups
     if (trailStats && trailStats.count > 0) {
-      const legendX = Math.round(pxW * 0.06);
-      const legendRight = pxW - Math.round(pxW * 0.06);
-      const statLabelSize = Math.round(5.12 * scale);
-      const statValueSize = Math.round(6.08 * scale);
-      const nameFontSize = Math.round(5.12 * scale);
-      const nameLineH = nameFontSize * 1.7;
-      const maxRows = 7;
-      // Match preview: legend anchored at bottom: 3.5%, content grows upward
-      // Calculate total legend height first, then position from bottom
-      const cols = trailStats.names.length > 0 ? Math.min(4, Math.ceil(trailStats.names.length / maxRows)) : 0;
-      const nameRows = cols > 0 ? Math.min(maxRows, Math.ceil(trailStats.names.length / cols)) : 0;
-      const legendContentH = Math.max(statLabelSize + statValueSize * 1.4, nameRows * nameLineH);
-      const legendBottom = pxH - Math.round(pxH * 0.035);
-      const legendTop = legendBottom - legendContentH;
+      const legendX = Math.round(pxW * 0.055);
+      const legendRight = pxW - Math.round(pxW * 0.055);
+      const legendTop = pxH - bottomH + Math.round(pxH * 0.028);
+      const legendBottom = pxH - Math.round(pxH * 0.038);
+      const availH = legendBottom - legendTop;
+
+      const groupKeys = DIFFICULTY_ORDER.filter(k => (trailStats.groups[k] || []).length);
+      const colCount = groupKeys.length + 1;
+      const colW = (legendRight - legendX) / colCount;
+
+      const headSize = Math.max(8, Math.round(4.2 * scale));
+      const entrySize = Math.max(7, Math.round(3.6 * scale));
+      const lineH = entrySize * 1.62;
+      const listTop = legendTop + headSize * 2.6;
+      const maxRows = Math.max(1, Math.floor((legendBottom - listTop) / lineH));
 
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = colors.text;
 
-      // Stats column
+      // Stat column
+      const statPairs = [
+        ['NUMBER OF TRAILS', String(trailStats.count)],
+        ['TOTAL DISTANCE', formatDistance(trailStats.distance)],
+      ];
       let sy = legendTop;
-      ctx.font = `700 ${statLabelSize}px "DM Sans", sans-serif`;
-      ctx.fillText('TOTAL DISTANCE', legendX, sy);
-      sy += statValueSize * 1.6;
-      ctx.font = `400 ${statValueSize}px "DM Sans", sans-serif`;
-      const distLabel = trailStats.distance >= 100000 ? `${Math.round(trailStats.distance / 1000)} km` : trailStats.distance >= 1000 ? `${(trailStats.distance / 1000).toFixed(1)} km` : `${trailStats.distance} m`;
-      ctx.fillText(distLabel, legendX, sy);
-
-      // Trail names in columns (sorted by popularity)
-      if (trailStats.names.length > 0) {
-        const nameX = legendX + Math.round(pxW * 0.12);
-        const colWidth = (legendRight - nameX) / cols;
-
-        // Fixed-width number column so trail names align
-        ctx.font = `700 ${nameFontSize}px "DM Sans", sans-serif`;
-        const numColWidth = ctx.measureText('00 ').width;
-
-        trailStats.names.slice(0, maxRows * cols).forEach((name, i) => {
-          const row = Math.floor(i / cols);
-          const col = i % cols;
-          const x = nameX + col * colWidth;
-          const y = legendTop + row * nameLineH;
-          // Right-align number within fixed column
-          ctx.font = `700 ${nameFontSize}px "DM Sans", sans-serif`;
-          const numStr = `${i + 1}`;
-          const numW = ctx.measureText(numStr).width;
-          ctx.fillText(numStr, x + numColWidth - numW - ctx.measureText(' ').width, y);
-          // Draw trail name after fixed number column
-          ctx.font = `400 ${nameFontSize}px "DM Sans", sans-serif`;
-          const maxNameW = colWidth - numColWidth - nameFontSize;
-          let displayName = name;
-          while (displayName.length > 0 && ctx.measureText(displayName).width > maxNameW) {
-            displayName = displayName.slice(0, -1);
-          }
-          if (displayName.length < name.length) displayName = displayName.trim() + '...';
-          ctx.fillText(displayName, x + numColWidth, y);
-        });
+      for (const [k, v] of statPairs) {
+        ctx.fillStyle = colors.text;
+        ctx.font = `700 ${headSize}px "DM Sans", sans-serif`;
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(headSize * 0.08)}px`;
+        ctx.fillText(k, legendX, sy);
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+        ctx.font = `400 ${Math.round(entrySize * 1.2)}px "DM Sans", sans-serif`;
+        ctx.fillText(v, legendX, sy + headSize * 1.4);
+        sy += headSize * 1.4 + entrySize * 1.2 + lineH * 0.9;
       }
+
+      // Difficulty columns
+      groupKeys.forEach((key, gi) => {
+        const colX = legendX + colW * (gi + 1);
+        const list = trailStats.groups[key];
+        // Header: shape glyph + label
+        drawShapeGlyph(ctx, key, colX + headSize * 0.5, legendTop + headSize * 0.55, headSize * 0.5, colors.text);
+        ctx.fillStyle = colors.text;
+        ctx.font = `700 ${headSize}px "DM Sans", sans-serif`;
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = `${Math.round(headSize * 0.08)}px`;
+        ctx.fillText(DIFFICULTY[key].label.toUpperCase(), colX + headSize * 1.6, legendTop);
+        if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+
+        const shown = list.slice(0, list.length > maxRows ? maxRows - 1 : maxRows);
+        shown.forEach((it, i) => {
+          const y = listTop + i * lineH;
+          ctx.fillStyle = colors.text;
+          ctx.font = `700 ${entrySize}px "DM Sans", sans-serif`;
+          ctx.fillText(String(it.number), colX, y);
+          ctx.font = `400 ${entrySize}px "DM Sans", sans-serif`;
+          let nm = it.name;
+          const maxW = colW - entrySize * 3.4;
+          while (nm.length && ctx.measureText(nm).width > maxW) nm = nm.slice(0, -1);
+          if (nm.length < it.name.length) nm = nm.replace(/\s+\S*$/, '') + '…';
+          ctx.fillText(nm, colX + entrySize * 2.4, y);
+        });
+        if (list.length > maxRows) {
+          ctx.fillStyle = colors.text;
+          ctx.globalAlpha = 0.55;
+          ctx.font = `400 ${entrySize}px "DM Sans", sans-serif`;
+          ctx.fillText(`+${list.length - (maxRows - 1)} more`, colX, listTop + (maxRows - 1) * lineH);
+          ctx.globalAlpha = 1;
+        }
+      });
       ctx.textBaseline = 'alphabetic';
     }
 
@@ -819,6 +952,26 @@ async function exportPoster({ map, colors, title, subtitle, textPosition, fontSi
 }
 
 // --- Component ---
+
+// Small difficulty-shape glyph for legend headers
+function ShapeSwatch({ shape, color, size = 7 }) {
+  const s = size;
+  const common = { fill: color };
+  return (
+    <svg width={s} height={s} viewBox="0 0 10 10" style={{ flexShrink: 0, display: 'block' }}>
+      {shape === 'circle' && <circle cx="5" cy="5" r="4.2" {...common} />}
+      {shape === 'dot' && <circle cx="5" cy="5" r="3" {...common} />}
+      {shape === 'square' && <rect x="1" y="1" width="8" height="8" {...common} />}
+      {shape === 'diamond' && <path d="M5 0.5 L9.5 5 L5 9.5 L0.5 5 Z" {...common} />}
+      {shape === 'double' && (
+        <>
+          <path d="M3.4 1.4 L5 5 L3.4 8.6 L0.4 5 Z" {...common} />
+          <path d="M6.6 1.4 L9.6 5 L6.6 8.6 L5 5 Z" {...common} />
+        </>
+      )}
+    </svg>
+  );
+}
 
 export default function TrailPoster() {
   const mapContainerRef = useRef(null);
@@ -845,13 +998,20 @@ export default function TrailPoster() {
   const [fontSize, setFontSize] = useState(32);
   const [dpi, setDpi] = useState(200);
   const [minNetworkSize, setMinNetworkSize] = useState(0);
-  const [trailStats, setTrailStats] = useState({ count: 0, distance: 0, names: [] });
+  const [trailStats, setTrailStats] = useState({ count: 0, distance: 0, groups: {}, markers: [] });
   const [scaleInfo, setScaleInfo] = useState(null);
 
   const size = POSTER_SIZES[sizeIdx];
   const frameW = orientation === 'landscape' ? size.h : size.w;
   const frameH = orientation === 'landscape' ? size.w : size.h;
   const aspectRatio = frameW / frameH;
+
+  // Poster band sizes (percent of frame) — kept in sync with the export canvas
+  const hasTopTitle = textPosition === 'top' && (title || subtitle);
+  const topBandPct = (hasTopTitle ? TOP_BAND : BARE_BAND) * 100;
+  const bottomBandPct = (trailStats.count > 0 ? BOTTOM_BAND : BARE_BAND) * 100;
+  const sideBandPct = SIDE_BAND * 100;
+  const legendGroups = DIFFICULTY_ORDER.filter((k) => (trailStats.groups?.[k] || []).length);
 
   // Push filtered trail data and labels to the map sources
   const applyTrailFilter = useCallback((map, geojson, minLen) => {
@@ -896,6 +1056,18 @@ export default function TrailPoster() {
   useEffect(() => { textPositionRef.current = textPosition; }, [textPosition]);
   useEffect(() => { titleRef.current = title; }, [title]);
 
+  // Nudge the zoom control inside the poster's visible window so the margin
+  // bands don't clip it.
+  useEffect(() => {
+    const host = mapContainerRef.current;
+    const ctrl = host?.querySelector('.maplibregl-ctrl-top-left');
+    if (!host || !ctrl) return;
+    const { width, height } = host.getBoundingClientRect();
+    const offX = Math.round(width * SIDE_BAND + 10);
+    const offY = Math.round(Math.max(height * (topBandPct / 100), height * 0.075) + 10);
+    ctrl.style.transform = `translate(${offX}px, ${offY}px)`;
+  }, [mapReady, topBandPct, sizeIdx, orientation]);
+
   // Initialize map
   useEffect(() => {
     let cancelled = false;
@@ -919,13 +1091,14 @@ export default function TrailPoster() {
           attributionControl: false,
         });
 
-        map.addControl(new maplibregl.NavigationControl(), 'top-left');
+        map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
 
         map.on('load', () => {
           if (cancelled) return;
           mapRef.current = map;
           setMapReady(true);
           setLoading(false);
+          try { addDifficultyIcons(map, colors); } catch (e) { console.warn('marker icons failed', e); }
 
           // Initial trail fetch
           loadTrails(map);
@@ -971,10 +1144,10 @@ export default function TrailPoster() {
         const newStyle = buildPosterStyle(baseStyle, newColors);
 
         map.once('style.load', () => {
-          // Restore trail data after style swap
-          const src = map.getSource('trails-geojson');
-          if (src && cachedTrailsRef.current) {
-            src.setData(cachedTrailsRef.current);
+          // Re-register marker icons in the new ink, then restore trail lines + markers
+          addDifficultyIcons(map, newColors);
+          if (cachedTrailsRef.current) {
+            applyTrailFilter(map, cachedTrailsRef.current, minNetworkRef.current);
           }
         });
 
@@ -987,7 +1160,7 @@ export default function TrailPoster() {
         } catch { /* layers may not exist */ }
       }
     },
-    []
+    [applyTrailFilter]
   );
 
   function handleMinNetworkSize(value) {
@@ -1117,11 +1290,11 @@ export default function TrailPoster() {
             {/* Poster frame overlays */}
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
               {/* Side margins */}
-              <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '4.5%', background: colors.background }} />
-              <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: '4.5%', background: colors.background }} />
+              <div style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: `${sideBandPct}%`, background: colors.background }} />
+              <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: `${sideBandPct}%`, background: colors.background }} />
 
               {/* Top band — covers everything from top edge down through title + scale/compass */}
-              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: textPosition === 'top' && (title || subtitle) ? '14%' : '3.5%', background: colors.background }} />
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: `${topBandPct}%`, background: colors.background }} />
 
               {/* Scale bar */}
               {scaleInfo && (
@@ -1154,52 +1327,64 @@ export default function TrailPoster() {
                   {title && (
                     <div style={{
                       fontFamily: 'var(--font-display)', fontWeight: 700,
-                      fontSize: `${Math.max(fontSize * 0.6, 10)}px`, color: colors.text,
-                      letterSpacing: '0.15em', textTransform: 'uppercase', lineHeight: 1.2,
+                      fontSize: `${Math.max(fontSize * 0.78, 12)}px`, color: colors.text,
+                      letterSpacing: '0.28em', textTransform: 'uppercase', lineHeight: 1.15,
+                      paddingLeft: '0.28em',
                     }}>{title}</div>
                   )}
                   {subtitle && (
                     <div style={{
                       fontFamily: 'var(--font-body)',
                       fontSize: `${Math.max(fontSize * 0.3, 7)}px`,
-                      color: colors.text, marginTop: '0.25rem',
-                      letterSpacing: '0.1em', textTransform: 'uppercase',
+                      color: colors.text, marginTop: '0.45em',
+                      letterSpacing: '0.24em', textTransform: 'uppercase',
+                      paddingLeft: '0.24em',
                     }}>{subtitle}</div>
                   )}
                 </div>
               )}
 
               {/* Bottom band — covers everything from bottom edge up through legend */}
-              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: trailStats.count > 0 ? '15.5%' : '3.5%', background: colors.background }} />
+              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: `${bottomBandPct}%`, background: colors.background }} />
 
-              {/* Legend */}
+              {/* Legend — stat block + difficulty groups */}
               {trailStats.count > 0 && (
                 <div style={{
-                  position: 'absolute', bottom: '3.5%', left: '6%', right: '6%',
-                  display: 'flex', gap: '5%',
+                  position: 'absolute', bottom: '3.5%', top: `${100 - bottomBandPct + 2.6}%`, left: '5.5%', right: '5.5%',
+                  display: 'flex', gap: '3%', alignItems: 'flex-start',
                   color: colors.text, fontFamily: 'var(--font-body)',
                 }}>
-                  <div style={{ flexShrink: 0, lineHeight: 1.6 }}>
-                    <div style={{ fontSize: '0.32rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total distance</div>
-                    <div style={{ fontSize: '0.38rem' }}>{trailStats.distance >= 100000 ? `${Math.round(trailStats.distance / 1000)} km` : trailStats.distance >= 1000 ? `${(trailStats.distance / 1000).toFixed(1)} km` : `${trailStats.distance} m`}</div>
+                  {/* Stat block */}
+                  <div style={{ flex: '0 0 auto', minWidth: '13%', lineHeight: 1.5 }}>
+                    {[
+                      ['Number of Trails', String(trailStats.count)],
+                      ['Total Distance', formatDistance(trailStats.distance)],
+                    ].map(([k, v]) => (
+                      <div key={k} style={{ marginBottom: '0.5em' }}>
+                        <div style={{ fontSize: '0.3rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{k}</div>
+                        <div style={{ fontSize: '0.36rem' }}>{v}</div>
+                      </div>
+                    ))}
                   </div>
-                  {trailStats.names.length > 0 && (
-                    <div style={{
-                      flex: 1,
-                      display: 'grid',
-                      gridTemplateColumns: `repeat(${Math.min(4, Math.ceil(trailStats.names.length / 6))}, 1fr)`,
-                      gap: '0 6px',
-                      alignContent: 'start',
-                      fontSize: '0.32rem',
-                      lineHeight: 1.6,
-                    }}>
-                      {trailStats.names.slice(0, 24).map((name, i) => (
-                        <div key={name} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          <span style={{ fontWeight: 700, display: 'inline-block', width: '1.4em', textAlign: 'right', marginRight: 3 }}>{i + 1}</span>{name}
+                  {/* Difficulty columns */}
+                  {legendGroups.map((key) => (
+                    <div key={key} style={{ flex: 1, minWidth: 0, lineHeight: 1.55, overflow: 'hidden' }}>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: '0.35em',
+                        fontSize: '0.3rem', fontWeight: 700, textTransform: 'uppercase',
+                        letterSpacing: '0.08em', marginBottom: '0.5em',
+                      }}>
+                        <ShapeSwatch shape={DIFFICULTY[key].shape} color={colors.text} />
+                        {DIFFICULTY[key].label}
+                      </div>
+                      {trailStats.groups[key].map((it) => (
+                        <div key={it.name} style={{ fontSize: '0.3rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <span style={{ fontWeight: 700, display: 'inline-block', minWidth: '1.4em' }}>{it.number}</span>
+                          {it.name}
                         </div>
                       ))}
                     </div>
-                  )}
+                  ))}
                 </div>
               )}
             </div>

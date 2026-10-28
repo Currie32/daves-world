@@ -238,6 +238,34 @@ EVENT_SOURCES = {
         "region": "tri-cities",
         "city": "Port Moody",
     },
+    "port_moody_signature": {
+        "label": "Port Moody Signature Events",
+        "kind": "html",
+        "url": "https://www.portmoody.ca/arts-culture-and-heritage/events/events-at-a-glance/",
+        "region": "tri-cities",
+        "city": "Port Moody",
+    },
+    "seasonal_curated": {
+        "label": "Seasonal Highlights",
+        "kind": "html",
+        "url": "https://www.destinationvancouver.com/events/annual-events",
+        "region": "metro-vancouver",
+        "city": None,
+    },
+    "vpl_kids": {
+        "label": "Vancouver Public Library (Kids & Family)",
+        "kind": "html",
+        "url": "https://vpl.bibliocommons.com/v2/events",
+        "region": "metro-vancouver",
+        "city": "Vancouver",
+    },
+    "surrey_libraries_kids": {
+        "label": "Surrey Libraries (Kids & Family)",
+        "kind": "html",
+        "url": "https://www.surreylibraries.ca/events",
+        "region": "metro-vancouver",
+        "city": "Surrey",
+    },
     "port_coquitlam": {
         "label": "City of Port Coquitlam",
         "kind": "html",
@@ -718,57 +746,327 @@ def _parse_port_moody(source_key, cfg):
     return events
 
 
+SIGNATURE_HEADING_RE = re.compile(
+    r"^(?P<title>.+?)\s+-\s+(?:\w+,\s+)?(?P<month>[A-Z][a-z]+)\s+(?P<d1>\d{1,2})"
+    r"(?:\s*(?:&|-|and)\s*(?:\w+,\s+)?(?:[A-Z][a-z]+\s+)?(?P<d2>\d{1,2}))?,\s+(?P<year>\d{4})$"
+)
+
+
+def _parse_port_moody_signature(source_key, cfg):
+    """Port Moody's "Events at a Glance" page lists the city's annual signature
+    events (Fingerling Festival, Golden Spike Days, ...) that the eSolutions
+    calendar doesn't carry. Each is an <h2> "Title - Saturday, May 2, 2026"
+    inside an AccordionTrigger, followed by an AccordionContent description."""
+    resp = requests.get(cfg["url"], headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    today = datetime.now().date()
+    events = []
+    for h2 in soup.select(".AccordionTrigger h2"):
+        match = SIGNATURE_HEADING_RE.match(_clean_text(h2.get_text()).replace("\xa0", " "))
+        if not match:
+            continue
+        try:
+            month = datetime.strptime(match["month"][:3], "%b").month
+            year = int(match["year"])
+            start = datetime(year, month, int(match["d1"])).date()
+            end = datetime(year, month, int(match["d2"])).date() if match["d2"] else None
+        except ValueError:
+            continue
+        if (end or start) < today:
+            continue
+        content = h2.find_parent(class_="AccordionTrigger")
+        content = content.find_next_sibling(class_="AccordionContent") if content else None
+        link = content.find("a", href=True) if content else None
+        events.append({
+            "title": match["title"],
+            "description": _clean_text(content.get_text())[:600] if content else None,
+            "tags": [],
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat() if end and end != start else None,
+            "allDay": True,
+            "timeText": None,
+            "price": _parse_price_text(None),
+            "url": link["href"] if link else cfg["url"],
+            "location": None,
+            "source": source_key,
+            "sourceEventUrl": cfg["url"] + "#" + re.sub(r"\W+", "-", match["title"].lower()),
+            "region": cfg["region"],
+        })
+    return events
+
+
+# Hand-maintained annual events that none of the scraped sources carry (cities
+# without a feed, plus paid attractions). Dates are from guide sites and should be
+# re-checked each season; an entry whose end date has passed is dropped automatically.
+# Fields: title, start/end (ISO), venue, address, city, lat/lng, free, price, url, tag.
+CURATED_SEASONAL_EVENTS = [
+    {"title": "VanDusen Festival of Lights", "start": "2026-11-27", "end": "2027-01-03",
+     "venue": "VanDusen Botanical Garden", "address": "5251 Oak St, Vancouver, BC", "city": "Vancouver",
+     "lat": 49.2394, "lng": -123.1296, "free": False, "price": "Ticketed",
+     "url": "https://www.destinationvancouver.com/events/annual-events/vandusen-festival-of-lights-vancouver"},
+    {"title": "Canyon Lights at Capilano Suspension Bridge", "start": "2026-11-20", "end": "2027-01-10",
+     "venue": "Capilano Suspension Bridge Park", "address": "3735 Capilano Rd, North Vancouver, BC", "city": "North Vancouver",
+     "lat": 49.3429, "lng": -123.1149, "free": False, "price": "Ticketed",
+     "url": "https://www.destinationvancouver.com/events/annual-events/capilano-canyon-lights-vancouver"},
+    {"title": "Peak of Christmas at Grouse Mountain", "start": "2026-11-27", "end": "2026-12-24",
+     "venue": "Grouse Mountain", "address": "6400 Nancy Greene Way, North Vancouver, BC", "city": "North Vancouver",
+     "lat": 49.3800, "lng": -123.0817, "free": False, "price": "Admission applies",
+     "url": "https://www.grousemountain.com/"},
+    {"title": "Heritage Christmas at Burnaby Village Museum", "start": "2026-11-25", "end": "2027-01-03",
+     "venue": "Burnaby Village Museum", "address": "6501 Deer Lake Ave, Burnaby, BC", "city": "Burnaby",
+     "lat": 49.2306, "lng": -122.9631, "free": True, "price": None,
+     "url": "https://www.burnaby.ca/recreation-and-arts/burnaby-village-museum"},
+    {"title": "Noel Holiday Light Festival (Bright Nights)", "start": "2026-11-27", "end": "2026-12-29",
+     "venue": "Cloverdale Fairgrounds", "address": "6050 176 St, Surrey, BC", "city": "Surrey",
+     "lat": 49.1060, "lng": -122.7283, "free": False, "price": "From $24, timed entry",
+     "url": "https://vancouversbestplaces.com/events-calendar/december/top-things-to-do-at-christmas/noel-holiday-light-festival-surrey/"},
+    {"title": "Surrey Tree Lighting Festival and Holiday Market", "start": "2026-11-21", "end": "2026-11-22",
+     "venue": "Surrey City Hall", "address": "13450 104 Ave, Surrey, BC", "city": "Surrey",
+     "lat": 49.1913, "lng": -122.8490, "free": True, "price": None,
+     "url": "https://www.surrey.ca/"},
+    {"title": "Glow Langley Christmas Lights", "start": "2026-11-19", "end": "2027-01-02",
+     "venue": "Milner Village Garden Centre", "address": "21650 Fraser Hwy, Langley, BC", "city": "Langley",
+     "lat": 49.0943, "lng": -122.6298, "free": False, "price": "Ticketed",
+     "url": "https://vancouversbestplaces.com/events-calendar/december/top-things-to-do-at-christmas/langley-glow-christmas-lights/"},
+    {"title": "Merry & Bright at Martini Town", "start": "2026-11-20", "end": "2026-12-31",
+     "venue": "Martini Town", "address": "Langley, BC", "city": "Langley",
+     "lat": None, "lng": None, "free": True, "price": None,
+     "url": "https://vancouversbestplaces.com/events-calendar/december/top-things-to-do-at-christmas/"},
+    {"title": "Christmas in the Village (Fort Langley)", "start": "2026-12-18", "end": "2026-12-20",
+     "venue": "Fort Langley", "address": "Fort Langley, BC", "city": "Langley",
+     "lat": 49.1696, "lng": -122.5798, "free": True, "price": None,
+     "url": "https://vancouversbestplaces.com/christmas-craft-fairs/"},
+    {"title": "Lights at Lafarge", "start": "2026-11-27", "end": "2027-02-14",
+     "venue": "Lafarge Lake - Douglas", "address": "1200 Pinetree Way, Coquitlam, BC", "city": "Coquitlam",
+     "lat": 49.2860, "lng": -122.7930, "free": True, "price": None,
+     "url": "https://www.coquitlam.ca/"},
+    {"title": "Make It Vancouver Holiday Craft Show", "start": "2026-12-10", "end": "2026-12-13",
+     "venue": "PNE Forum", "address": "2901 E Hastings St, Vancouver, BC", "city": "Vancouver",
+     "lat": 49.2827, "lng": -123.0426, "free": False, "price": "Ticketed",
+     "url": "https://vancouversbestplaces.com/christmas-craft-fairs/"},
+]
+
+
+def _parse_seasonal_curated(source_key, cfg):
+    today = datetime.now(PACIFIC_TZ).date().isoformat()
+    events = []
+    for item in CURATED_SEASONAL_EVENTS:
+        if item["end"] < today:
+            continue
+        loc = {"name": item["venue"], "address": item["address"]}
+        if item.get("lat"):
+            loc.update(lat=item["lat"], lng=item["lng"],
+                       mapsUrl=f"https://www.google.com/maps/search/?api=1&query={item['lat']},{item['lng']}")
+        price = _parse_price_text(None if item["free"] else item["price"] or "Ticketed")
+        price["isFree"] = item["free"]
+        events.append({
+            "title": item["title"],
+            "description": f"Seasonal highlight in {item['city']}. Dates are approximate - check the event site before going.",
+            "tags": [],
+            "startDate": max(item["start"], today),
+            "endDate": item["end"] if item["end"] != max(item["start"], today) else None,
+            "allDay": True,
+            "timeText": None,
+            "price": price,
+            "url": item["url"],
+            "location": loc,
+            "source": source_key,
+            "sourceEventUrl": item["url"] + "#" + re.sub(r"\W+", "-", item["title"].lower()),
+            "region": cfg["region"],
+            "city": item["city"],
+        })
+    return events
+
+
+# ─── Strategy: family programming from public library calendars ──────────────
+
+LIBRARY_LOOKAHEAD_DAYS = 56
+VPL_GATEWAY = "https://gateway.bibliocommons.com/v2/libraries/vpl/events/search"
+# BiblioCommons audience ids for VPL: Babies, Toddlers, Preschool, School Age, Family
+VPL_FAMILY_AUDIENCES = ",".join([
+    "53c940484246f6147c00000d", "53c940484246f6147c00000e", "53c940484246f6147c00000f",
+    "53c940484246f6147c000010", "620d47cd5a2694410016f05e",
+])
+
+
+def _parse_vpl_kids(source_key, cfg):
+    """VPL runs on BiblioCommons, whose public gateway returns events as JSON
+    (events + a `locations` entity map), filterable by audience. Online-only
+    sessions are skipped since the Events page is location-based."""
+    session = requests.Session()
+    session.headers.update({**HEADERS, "Accept": "application/json"})
+    today = datetime.now(PACIFIC_TZ).date()
+    params = {
+        "startDate": today.isoformat(),
+        "endDate": (today + timedelta(days=LIBRARY_LOOKAHEAD_DAYS)).isoformat(),
+        "audiences": VPL_FAMILY_AUDIENCES, "limit": 100, "page": 1,
+    }
+    events, page, pages = [], 1, 1
+    while page <= min(pages, 15):
+        params["page"] = page
+        resp = session.get(VPL_GATEWAY, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        pages = data["events"]["pagination"]["pages"]
+        page += 1
+        entities = data.get("entities") or {}
+        locations = entities.get("locations") or {}
+        for ev_id in data["events"]["results"]:
+            ev = (entities.get("events") or {}).get(ev_id)
+            d = (ev or {}).get("definition") or {}
+            if not d or d.get("isCancelled") or not d.get("start"):
+                continue
+            branch = locations.get(d.get("branchLocationId")) or {}
+            if not branch or branch.get("id") == "BC_VIRTUAL":
+                continue
+            addr = branch.get("address") or {}
+            street = " ".join(x for x in [(addr.get("number") or "").strip(), addr.get("street")] if x)
+            start = datetime.fromisoformat(d["start"])
+            end = datetime.fromisoformat(d["end"]) if d.get("end") else None
+            desc = _clean_text(BeautifulSoup(d.get("description") or "", "html.parser").get_text(" "))
+            events.append({
+                "title": _clean_text(d.get("title") or ""),
+                "description": desc[:600] or None,
+                "tags": ["Family & Kids"],
+                "startDate": start.date().isoformat(),
+                "endDate": None,
+                "allDay": False,
+                "timeText": start.strftime("%-I:%M %p") + (f" - {end.strftime('%-I:%M %p')}" if end else ""),
+                "price": _parse_price_text(None),
+                "url": f"https://vpl.bibliocommons.com/v2/events/{ev_id}",
+                "location": {"name": f"VPL {branch.get('name')}",
+                             "address": f"{street}, Vancouver, BC" if street else f"{branch.get('name')} Library, Vancouver, BC"},
+                "source": source_key,
+                "sourceEventUrl": f"https://vpl.bibliocommons.com/v2/events/{ev_id}",
+                "region": cfg["region"],
+            })
+    return [e for e in events if e["title"]]
+
+
+# Surrey Libraries audience ids: Babies, Toddlers, Preschool Age, School Age
+SURREY_FAMILY_AUDIENCES = ["148", "149", "150", "151"]
+
+
+def _parse_surrey_libraries_kids(source_key, cfg):
+    """Surrey Libraries' Drupal event list is filterable by audience and paged
+    10 per page (`?page=N`). Each occurrence has its own `?eventdate=` link."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    today = datetime.now(PACIFIC_TZ).date()
+    seen = {}
+    for audience in SURREY_FAMILY_AUDIENCES:
+        for page in range(25):
+            resp = session.get(cfg["url"], params={
+                "field_audience_target_id": audience,
+                "field_date_value[min]": today.isoformat(),
+                "field_date_value[max]": (today + timedelta(days=LIBRARY_LOOKAHEAD_DAYS)).isoformat(),
+                "page": page,
+            }, timeout=20)
+            resp.raise_for_status()
+            items = BeautifulSoup(resp.text, "html.parser").select(".event-info-item")
+            if not items:
+                break
+            for item in items:
+                link = item.select_one(".event-info-item-title a[href]")
+                times = item.select("time[datetime]")
+                if not link or not times:
+                    continue
+                href = link["href"]
+                if href in seen:
+                    continue
+                start = datetime.fromisoformat(times[0]["datetime"])
+                end = datetime.fromisoformat(times[-1]["datetime"]) if len(times) > 1 else None
+                if start.date() < today:
+                    continue
+                branch_el = item.select_one(".views-field-field-address .field-content")
+                branch = _clean_text(branch_el.get_text()) if branch_el else ""
+                if branch.lower() in ("online", "mobile library"):
+                    continue
+                url = f"https://www.surreylibraries.ca{href}"
+                seen[href] = {
+                    "title": _clean_text(link.get_text()),
+                    "description": None,
+                    "tags": ["Family & Kids"],
+                    "startDate": start.date().isoformat(),
+                    "endDate": None,
+                    "allDay": False,
+                    "timeText": start.strftime("%-I:%M %p") + (f" - {end.strftime('%-I:%M %p')}" if end else ""),
+                    "price": _parse_price_text(None),
+                    "url": url,
+                    "location": {"name": f"Surrey Libraries {branch}".strip(),
+                                 "address": f"Surrey Libraries {branch}, Surrey, BC"},
+                    "source": source_key,
+                    "sourceEventUrl": url,
+                    "region": cfg["region"],
+                }
+    return list(seen.values())
+
+
 TIME_RANGE_RE = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b.*?\d{1,2}(:\d{2})?\s*(am|pm)\b", re.IGNORECASE)
 
 
 def _parse_port_coquitlam(source_key, cfg):
-    soup = _fetch_html(cfg["url"])
-    events = _extract_jsonld_events(soup, cfg["url"])
-    if events:
-        return [{**e, "source": source_key, "region": cfg["region"]} for e in events]
-
-    # Fallback: event links inside the community calendar list view
-    today = datetime.now().date()
-    for link in soup.select("a[href*='/explore-poco/']"):
-        title = _clean_text(link.get_text())
-        if not title or len(title) < 3:
-            continue
-        container = link.find_parent(["li", "div", "article"]) or link.parent
-        context = _clean_text(container.get_text()) if container else ""
-        date_match = DATE_RE.search(context)
-        if not date_match:
-            continue
+    """PoCo's community calendar is a Drupal calendar-view: each month page lists
+    events as `li.calendar-view-day__row` (one per day a multi-day event spans),
+    and `?calendar_timestamp=<unix month start>` pages between months. The
+    daily "City Hall Illumination" lighting notices are skipped as noise."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    today = datetime.now(PACIFIC_TZ).date()
+    month = today.replace(day=1)
+    seen = {}
+    for _ in range(4):  # this month + next 3
+        ts = int(datetime(month.year, month.month, 1, tzinfo=PACIFIC_TZ).timestamp())
         try:
-            dt = datetime.strptime(date_match.group(0).replace(",", ""), "%B %d %Y").date()
-        except ValueError:
+            resp = session.get(
+                cfg["url"],
+                params={"calendar_timestamp": ts, "date_format": "custom", "date_pattern": "F",
+                        "use_previous_next": 1, "display_reset": 1, "pager_type": "calendar_month"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+        except Exception:
+            resp = None
+        month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+        if resp is None:
             continue
-        if dt < today - timedelta(days=1):
-            continue
-        time_match = TIME_RANGE_RE.search(context)
-        events.append({
-            "title": title,
-            "description": None,
-            "tags": [],
-            "startDate": dt.isoformat(),
-            "endDate": None,
-            "allDay": time_match is None,
-            "timeText": time_match.group(0) if time_match else None,
-            "price": _parse_price_text(None),
-            "url": link.get("href"),
-            "location": None,
-            "source": source_key,
-            "sourceEventUrl": link.get("href"),
-            "region": cfg["region"],
-        })
-    # De-dupe (same title/date can appear in both calendar + list DOM sections)
-    seen, unique = set(), []
-    for e in events:
-        key = (e["title"], e["startDate"])
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(e)
-    return unique
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for row in soup.select("li.calendar-view-day__row"):
+            link = row.select_one(".views-field-title a[href]")
+            times = row.select(".views-field-field-when time[datetime]")
+            if not link or not times:
+                continue
+            title = _clean_text(link.get_text())
+            if not title or title.lower().startswith("city hall illumination"):
+                continue
+            href = link["href"]
+            if href in seen:
+                continue
+            try:
+                start = datetime.fromisoformat(times[0]["datetime"])
+                end = datetime.fromisoformat(times[-1]["datetime"])
+            except ValueError:
+                continue
+            if end.date() < today:
+                continue
+            all_day = (start.hour, start.minute) == (0, 0) or (end - start) >= timedelta(hours=23)
+            seen[href] = {
+                "title": title,
+                "description": None,
+                "tags": [],
+                "startDate": start.date().isoformat(),
+                "endDate": end.date().isoformat() if end.date() != start.date() else None,
+                "allDay": all_day,
+                "timeText": None if all_day else start.strftime("%-I:%M %p"),
+                "price": _parse_price_text(None),
+                "url": f"https://www.portcoquitlam.ca{href}",
+                "location": None,
+                "source": source_key,
+                "sourceEventUrl": f"https://www.portcoquitlam.ca{href}",
+                "region": cfg["region"],
+            }
+    return list(seen.values())
 
 
 JSONLD_DATETIME_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{1,2}):(\d{2}))?")
@@ -839,13 +1137,79 @@ def _parse_tourism_burnaby(source_key, cfg):
     return events
 
 
+DESTINATION_VANCOUVER_API = "https://flus6j8v.apicdn.sanity.io/v2023-05-03/data/query/production"
+DESTINATION_VANCOUVER_QUERY = (
+    '*[_type=="event" && endDate>="@TODAY" && nextDate<="@HORIZON"]'
+    '{title,venue,address,categories,isFree,price,bookingLink,website,nextDate,endDate,longTerm,'
+    '"lat":location.geopoint.lat,"lng":location.geopoint.lng,"slug":slug.current,'
+    '"description":pt::text(richTextDescription)}'
+)
+
+
 def _parse_destination_vancouver(source_key, cfg):
-    soup = _fetch_html(cfg["url"])
-    events = _extract_jsonld_events(soup, cfg["url"])
-    # This page renders its calendar client-side via JS; JSON-LD (if present)
-    # is the only reliable extraction point without a headless browser. If
-    # it comes back empty, `refresh_events` will report 0 for this source.
-    return [{**e, "source": source_key, "region": cfg["region"]} for e in events]
+    """The calendar page renders client-side with no JSON-LD, so there's nothing
+    to scrape from the HTML. The site is a Next.js app on a Sanity CMS whose
+    public read API (the same one the page uses) returns every listed `event`
+    document with coordinates, so we query that for the next ~4 months."""
+    today = datetime.now(PACIFIC_TZ).date()
+    query = (DESTINATION_VANCOUVER_QUERY
+             .replace("@TODAY", today.isoformat())
+             .replace("@HORIZON", (today + timedelta(days=120)).isoformat()))
+    resp = requests.get(DESTINATION_VANCOUVER_API, params={"query": query}, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+
+    def local(raw):
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(PACIFIC_TZ)
+
+    events = []
+    for item in resp.json().get("result") or []:
+        try:
+            title = _clean_text(item.get("title") or "")
+            if not title or not item.get("nextDate"):
+                continue
+            start = local(item["nextDate"])
+            end = local(item["endDate"]) if item.get("endDate") else start
+            # Long-running listings (exhibitions, seasonal markets) span weeks; a
+            # single occurrence is shown as that day only.
+            multi_day = bool(item.get("longTerm")) and end.date() > start.date()
+            address = item.get("address") or {}
+            venue = _clean_text(item.get("venue") or "")
+            loc = None
+            if venue or address.get("formattedAddress"):
+                loc = {"name": venue or None, "address": address.get("formattedAddress") or None}
+                if item.get("lat") and item.get("lng"):
+                    loc["lat"], loc["lng"] = item["lat"], item["lng"]
+                    loc["mapsUrl"] = f"https://www.google.com/maps/search/?api=1&query={item['lat']},{item['lng']}"
+            price_text = item.get("price")
+            if item.get("isFree"):
+                price = _parse_price_text(None)
+            else:
+                price = _parse_price_text(f"${price_text}" if price_text else None)
+            price["isFree"] = bool(item.get("isFree"))
+            ticket = item.get("bookingLink") or None
+            if ticket:
+                price["ticketUrl"] = ticket
+            slug = item.get("slug")
+            event_url = (f"https://www.destinationvancouver.com/events/{slug}" if slug
+                         else item.get("website") or cfg["url"])
+            events.append({
+                "title": title,
+                "description": _clean_text(item.get("description") or "")[:600] or None,
+                "tags": item.get("categories") or [],
+                "startDate": start.date().isoformat(),
+                "endDate": end.date().isoformat() if multi_day else None,
+                "allDay": False,
+                "timeText": start.strftime("%-I:%M %p"),
+                "price": price,
+                "url": event_url,
+                "location": loc,
+                "source": source_key,
+                "sourceEventUrl": event_url,
+                "region": cfg["region"],
+            })
+        except Exception:
+            continue
+    return events
 
 
 # ─── Strategy: Metro Vancouver's SharePoint "Calendar" list ──────────────────
@@ -1009,6 +1373,10 @@ def _parse_new_westminster(source_key, cfg):
 
 _HTML_PARSERS = {
     "port_moody": _parse_port_moody,
+    "port_moody_signature": _parse_port_moody_signature,
+    "seasonal_curated": _parse_seasonal_curated,
+    "vpl_kids": _parse_vpl_kids,
+    "surrey_libraries_kids": _parse_surrey_libraries_kids,
     "port_coquitlam": _parse_port_coquitlam,
     "metro_vancouver_parks": _parse_metro_vancouver_parks,
     "destination_vancouver": _parse_destination_vancouver,
@@ -1039,7 +1407,28 @@ def _scrape_source(source_key, cfg):
                 loc["mapsUrl"] = f"https://www.google.com/maps/search/?api=1&query={geo['lat']},{geo['lng']}"
         e["city"] = _guess_city(cfg, loc)
         e["tags"] = _standardize_tags(e.get("tags"), e.get("title"), e.get("description"))
-    return events
+    return _dedupe_events(events)
+
+
+def _dedupe_key(e):
+    norm = lambda t: re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+    loc = e.get("location") or {}
+    return (norm(e.get("title")), e.get("startDate"),
+            re.sub(r"\s+", "", (e.get("timeText") or "").lower()), norm(loc.get("name")))
+
+
+def _dedupe_events(events):
+    """Drop repeats of the same listing within one source (same title, day,
+    time and venue), keeping the first - sources like Tourism Burnaby list an
+    event under several categories."""
+    seen, unique = set(), []
+    for e in events:
+        key = _dedupe_key(e)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(e)
+    return unique
 
 
 def _upsert_events(events):
@@ -1181,6 +1570,732 @@ def scrape_events(req: https_fn.CallableRequest) -> dict:
 
     count = _upsert_events(events)
     return {"count": count, "source_key": source_key}
+
+
+# ─── Price Tracker ────────────────────────────────────────────────────────────
+#
+# Watches product pages (single item) or retailer listing/brand pages
+# (category watch, e.g. "any Thule roof box") for price drops and emails
+# PRICE_ALERT_TO when the tracked lowest price beats both the watch's
+# baseline and the last price we already alerted on.
+#
+# Most big-box retailers (MEC, Canadian Tire, Amazon, SportChek) block plain
+# server-side requests outright, so fetching routes through ScraperAPI for
+# domains flagged `proxy: True` below, or as a fallback when a direct fetch
+# comes back 403/429/503. Smaller/Shopify-style sites (Thule.com, TDot
+# Performance, Altitude Sports, Rack Attack) serve clean HTML directly.
+
+PRICE_RETAILERS = {
+    "mec.ca": {"label": "MEC", "proxy": True},
+    "canadiantire.ca": {"label": "Canadian Tire", "proxy": True},
+    "amazon.ca": {"label": "Amazon.ca", "proxy": True},
+    "sportchek.ca": {"label": "SportChek", "proxy": True},
+    "atmosphere.ca": {"label": "Atmosphere", "proxy": True},
+    "walmart.ca": {"label": "Walmart.ca", "proxy": True},
+    "thule.com": {"label": "Thule", "proxy": False},
+    "tdotperformance.ca": {"label": "TDot Performance", "proxy": False},
+    "altitude-sports.com": {"label": "Altitude Sports", "proxy": False},
+    "rackattack.ca": {"label": "Rack Attack", "proxy": False},
+}
+
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+PRICE_ALERT_FROM = os.environ.get("PRICE_ALERT_FROM")
+PRICE_ALERT_TO = os.environ.get("PRICE_ALERT_TO")
+
+PRICE_RE = re.compile(r"\$?\s*([\d,]+\.\d{2}|\d{1,3}(?:,\d{3})*|\d+)")
+
+
+def _retailer_for(url):
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for domain, cfg in PRICE_RETAILERS.items():
+        if host == domain or host.endswith("." + domain):
+            return domain, cfg
+    return host, {"label": host, "proxy": False}
+
+
+def _fetch_price_html(url, force_proxy=False):
+    """Fetch a product/listing page, routing through ScraperAPI when the
+    retailer is known to block direct requests or a direct attempt is
+    blocked. Returns (html, used_proxy); raises with a short reason on
+    total failure so the caller can record it in `lastErrors`."""
+    domain, cfg = _retailer_for(url)
+    use_proxy_first = force_proxy or cfg.get("proxy")
+
+    def via_proxy():
+        if not SCRAPERAPI_KEY:
+            raise RuntimeError("blocked and no SCRAPERAPI_KEY configured")
+        resp = requests.get(
+            "https://api.scraperapi.com/",
+            params={"api_key": SCRAPERAPI_KEY, "url": url, "country_code": "ca"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.text
+
+    if use_proxy_first:
+        return via_proxy(), True
+
+    try:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        resp = session.get(url, timeout=15)
+        if resp.status_code in (403, 429, 503):
+            raise requests.HTTPError(f"{resp.status_code} blocked")
+        resp.raise_for_status()
+        return resp.text, False
+    except Exception:
+        return via_proxy(), True
+
+
+def _parse_money(text):
+    if not text:
+        return None
+    match = PRICE_RE.search(text.replace(",", ""))
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+        return value if 0 < value < 100000 else None
+    except ValueError:
+        return None
+
+
+def _extract_jsonld_offers(soup, base_url):
+    """Walk schema.org Product/Offer JSON-LD blocks, same traversal shape as
+    `_extract_jsonld_events`, and return a list of {title, price, url}."""
+    offers = []
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+        candidates = data if isinstance(data, list) else [data]
+        for node in candidates:
+            graph = node.get("@graph") if isinstance(node, dict) else None
+            for item in (graph if graph else [node]):
+                if not isinstance(item, dict):
+                    continue
+                types = item.get("@type")
+                types = [types] if isinstance(types, str) else (types or [])
+                if not any("Product" in t for t in types):
+                    continue
+                offer = item.get("offers")
+                if isinstance(offer, list):
+                    offer = offer[0] if offer else None
+                if not isinstance(offer, dict):
+                    continue
+                price = _parse_money(str(offer.get("price") or offer.get("lowPrice") or ""))
+                if price is None:
+                    continue
+                offers.append({
+                    "title": _clean_text(item.get("name", "")),
+                    "price": price,
+                    "url": offer.get("url") or item.get("url") or base_url,
+                })
+    return offers
+
+
+def _extract_meta_offer(soup, base_url):
+    """Fallback for pages with a single product and og:/product: meta price
+    tags but no (or malformed) JSON-LD."""
+    for prop in ("product:price:amount", "og:price:amount"):
+        meta = soup.find("meta", attrs={"property": prop})
+        if meta and meta.get("content"):
+            price = _parse_money(meta["content"])
+            if price is not None:
+                title_meta = soup.find("meta", attrs={"property": "og:title"})
+                title = _clean_text(title_meta["content"]) if title_meta and title_meta.get("content") else _clean_text(soup.title.get_text() if soup.title else "")
+                return [{"title": title, "price": price, "url": base_url}]
+    price_meta = soup.find(attrs={"itemprop": "price"})
+    if price_meta:
+        price = _parse_money(price_meta.get("content") or price_meta.get_text())
+        if price is not None:
+            title = _clean_text(soup.title.get_text()) if soup.title else ""
+            return [{"title": title, "price": price, "url": base_url}]
+    return []
+
+
+def _extract_card_offers(soup, base_url):
+    """Generic fallback for listing/brand pages: schema.org Product JSON-LD
+    almost never appears on a *listing* page (only per-product detail pages),
+    so instead walk every element whose class name contains "price", read a
+    dollar amount out of it, then climb to the nearest ancestor holding a
+    product `<a href>` for the title/url. Works across the common Magento/
+    Shopify/BigCommerce card markup without a retailer-specific parser.
+    Callers must filter the (noisy) results by matchTerms/excludeTerms."""
+    from urllib.parse import urljoin
+    generic_link_text = {
+        "learn more", "view", "quick view", "add to cart", "shop now",
+        "buy now", "details", "select options", "compare", "add to compare",
+    }
+
+    def link_title(link):
+        text = _clean_text(link.get_text(strip=True))
+        if text and text.lower() not in generic_link_text:
+            return text
+        img = link.find("img")
+        if img and img.get("alt"):
+            return _clean_text(img["alt"])
+        title_attr = link.get("title")
+        return _clean_text(title_attr) if title_attr else ""
+
+    offers, seen_urls = [], set()
+    for price_el in soup.select('[class*="price" i]'):
+        price = _parse_money(price_el.get_text())
+        if price is None:
+            continue
+        # Climb until we find an ancestor holding a real (non-CTA) product link,
+        # since the nearest <a> to a price is often a generic "Learn More" button.
+        container, best_link, best_title = price_el, None, ""
+        for _ in range(6):
+            if container is None:
+                break
+            for link in container.find_all("a", href=True):
+                title = link_title(link)
+                if title:
+                    best_link, best_title = link, title
+                    break
+            if best_link:
+                break
+            container = container.parent
+        if not best_link:
+            continue
+        url = urljoin(base_url, best_link["href"])
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        offers.append({"title": best_title, "price": price, "url": url})
+    return offers
+
+
+def _extract_offers(html_text, base_url, kind="product"):
+    """Best-effort product offer extraction. Product pages try structured
+    data first (JSON-LD, then meta/itemprop price tags), falling back to the
+    generic card scan. Listing pages go straight to the card scan, since
+    structured Product data is rarely present on a listing/brand page."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    if kind == "listing":
+        return _extract_card_offers(soup, base_url)
+    offers = _extract_jsonld_offers(soup, base_url)
+    if offers:
+        return offers
+    offers = _extract_meta_offer(soup, base_url)
+    if offers:
+        return offers
+    return _extract_card_offers(soup, base_url)
+
+
+def _matches_terms(title, match_terms, exclude_terms):
+    lower = (title or "").lower()
+    if match_terms and not all(t.lower() in lower for t in match_terms):
+        return False
+    if exclude_terms and any(t.lower() in lower for t in exclude_terms):
+        return False
+    return True
+
+
+def _check_source(source, match_terms, exclude_terms):
+    """Fetch one watch source and return (offers, error). `offers` is a list
+    of {retailer, title, price, url}; for a listing page this can be many,
+    filtered by matchTerms/excludeTerms; for a product page it's normally one."""
+    domain, cfg = _retailer_for(source["url"])
+    try:
+        html_text, _used_proxy = _fetch_price_html(source["url"])
+        raw_offers = _extract_offers(html_text, source["url"], source.get("kind", "product"))
+        if not raw_offers:
+            return [], "No price found on page"
+        offers = [
+            {"retailer": cfg["label"], "title": o["title"], "price": o["price"], "url": o["url"]}
+            for o in raw_offers
+            if source.get("kind") != "listing" or _matches_terms(o["title"], match_terms, exclude_terms)
+        ]
+        if not offers:
+            return [], "No matching products found"
+        return offers, None
+    except Exception as e:
+        return [], str(e)
+
+
+def _check_watch(db_client, watch_id, watch):
+    sources = watch.get("sources") or []
+    match_terms = watch.get("matchTerms") or []
+    exclude_terms = watch.get("excludeTerms") or []
+
+    all_offers, errors = [], {}
+    for source in sources:
+        offers, error = _check_source(source, match_terms, exclude_terms)
+        all_offers.extend(offers)
+        if error:
+            errors[source["retailer"]] = error
+
+    watch_ref = db_client.collection("price_watches").document(watch_id)
+    now = datetime.now(ZoneInfo("America/Vancouver"))
+    today_iso = now.date().isoformat()
+
+    if not all_offers:
+        watch_ref.set({"lastCheckedAt": firestore.SERVER_TIMESTAMP, "lastErrors": errors}, merge=True)
+        return None
+
+    lowest = min(all_offers, key=lambda o: o["price"])
+    watch_ref.collection("history").document(today_iso).set({
+        "date": today_iso,
+        "lowest": lowest,
+        "offers": all_offers,
+    })
+
+    updates = {
+        "lowestNow": {**lowest, "checkedAt": firestore.SERVER_TIMESTAMP},
+        "lastCheckedAt": firestore.SERVER_TIMESTAMP,
+        "lastErrors": errors,
+    }
+    all_time_low = watch.get("allTimeLow")
+    if not all_time_low or lowest["price"] < all_time_low["price"]:
+        updates["allTimeLow"] = {**lowest, "date": today_iso}
+    watch_ref.set(updates, merge=True)
+
+    baseline = watch.get("baselinePrice")
+    target = watch.get("targetPrice")
+    last_notified = watch.get("lastNotifiedPrice")
+    should_alert = (
+        baseline is not None and lowest["price"] < baseline
+        and (last_notified is None or lowest["price"] < last_notified)
+        and (target is None or lowest["price"] <= target)
+    )
+    if should_alert:
+        watch_ref.set({"lastNotifiedPrice": lowest["price"]}, merge=True)
+        return {"watchName": watch.get("name"), "baseline": baseline, **lowest}
+    return None
+
+
+def _send_price_email(drops):
+    if not (RESEND_API_KEY and PRICE_ALERT_FROM and PRICE_ALERT_TO):
+        return
+    rows = "".join(
+        f"<tr><td style='padding:8px 12px;border-bottom:1px solid #e8e2da'>{d['watchName']}</td>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #e8e2da'>{d['retailer']}</td>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #e8e2da'>${d['baseline']:.2f} → ${d['price']:.2f}</td>"
+        f"<td style='padding:8px 12px;border-bottom:1px solid #e8e2da'><a href='{d['url']}'>View</a></td></tr>"
+        for d in drops
+    )
+    html_body = (
+        "<h2>Price drop alert</h2>"
+        "<table style='border-collapse:collapse;font-family:sans-serif;font-size:14px'>"
+        "<tr><th align='left' style='padding:8px 12px'>Item</th><th align='left' style='padding:8px 12px'>Retailer</th>"
+        "<th align='left' style='padding:8px 12px'>Price</th><th align='left' style='padding:8px 12px'></th></tr>"
+        f"{rows}</table>"
+    )
+    try:
+        requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "from": PRICE_ALERT_FROM,
+                "to": [PRICE_ALERT_TO],
+                "subject": f"Price drop: {len(drops)} item(s) cheaper",
+                "html": html_body,
+            },
+            timeout=15,
+        )
+    except Exception:
+        pass  # best-effort; failures here shouldn't break the price check
+
+
+def _check_all_watches():
+    db_client = firestore.client()
+    watches = db_client.collection("price_watches").where("active", "==", True).stream()
+    drops = []
+    for doc in watches:
+        result = _check_watch(db_client, doc.id, doc.to_dict())
+        if result:
+            drops.append(result)
+    if drops:
+        _send_price_email(drops)
+    return len(drops)
+
+
+@scheduler_fn.on_schedule(schedule="0 8 * * *", region="us-west1", timezone="America/Vancouver",
+                           memory=512, timeout_sec=540)
+def scheduled_check_prices(event: scheduler_fn.ScheduledEvent) -> None:
+    """Daily cron: re-check every active price watch and email on drops."""
+    _check_all_watches()
+
+
+@https_fn.on_call(invoker="public", region="us-west1", memory=512, timeout_sec=300)
+def check_prices_now(req: https_fn.CallableRequest) -> dict:
+    """Admin action: re-check one watch (or all, if watchId is omitted)."""
+    watch_id = (req.data or {}).get("watchId")
+    db_client = firestore.client()
+    if watch_id:
+        ref = db_client.collection("price_watches").document(watch_id)
+        snap = ref.get()
+        if not snap.exists:
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.NOT_FOUND, message="Watch not found",
+            )
+        result = _check_watch(db_client, watch_id, snap.to_dict())
+        if result:
+            _send_price_email([result])
+        return {"checked": 1, "dropped": 1 if result else 0}
+    return {"checked": None, "dropped": _check_all_watches()}
+
+
+@https_fn.on_call(invoker="public", region="us-west1", memory=512, timeout_sec=60)
+def preview_price_source(req: https_fn.CallableRequest) -> dict:
+    """Admin action: validate a URL for the add-watch form before saving,
+    returning the retailer label plus whatever offer(s) were found so the
+    baseline price can be set from a real result."""
+    data = req.data or {}
+    url = (data.get("url") or "").strip()
+    kind = data.get("kind", "product")
+    match_terms = data.get("matchTerms") or []
+    exclude_terms = data.get("excludeTerms") or []
+    if not url:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="url is required",
+        )
+
+    domain, cfg = _retailer_for(url)
+    offers, error = _check_source({"url": url, "retailer": cfg["label"], "kind": kind}, match_terms, exclude_terms)
+    if error:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE, message=error,
+        )
+    lowest = min(offers, key=lambda o: o["price"])
+    return {"retailer": cfg["label"], "offerCount": len(offers), **lowest}
+
+
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+
+
+def _tavily_search(query, include_domains=None, max_results=8):
+    body = {"api_key": TAVILY_API_KEY, "query": query, "max_results": max_results}
+    if include_domains:
+        body["include_domains"] = include_domains
+    resp = requests.post("https://api.tavily.com/search", json=body, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("results", [])
+
+
+@https_fn.on_call(invoker="public", region="us-west1", memory=256, timeout_sec=30)
+def find_retailer_sources(req: https_fn.CallableRequest) -> dict:
+    """Admin action: search the web for retailer pages that might sell the
+    named item, biased toward the retailers already in PRICE_RETAILERS but
+    not limited to them (good sources are item-dependent). Returns candidate
+    links only - no price fetch here, that's the existing per-row "Test"
+    button (preview_price_source), so this stays fast and cheap."""
+    data = req.data or {}
+    name = (data.get("name") or "").strip()
+    match_terms = data.get("matchTerms") or []
+    if not name:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT, message="name is required",
+        )
+    if not TAVILY_API_KEY:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="TAVILY_API_KEY is not configured on the server.",
+        )
+
+    query = " ".join([name, *match_terms, "buy canada"])
+    try:
+        known_results = _tavily_search(query, include_domains=list(PRICE_RETAILERS.keys()))
+        general_results = _tavily_search(query)
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE, message=f"Search failed: {e}",
+        )
+
+    candidates, seen_domains = [], set()
+    for result in known_results + general_results:
+        url = result.get("url")
+        if not url:
+            continue
+        domain, cfg = _retailer_for(url)
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        candidates.append({
+            "title": result.get("title") or cfg["label"],
+            "url": url,
+            "domain": domain,
+            "retailer": cfg["label"],
+            "known": domain in PRICE_RETAILERS,
+        })
+        if len(candidates) >= 8:
+            break
+
+    return {"candidates": candidates}
+
+
+# ─── Places Autocomplete Proxy ────────────────────────────────────────────────
+#
+# Keeps the Google Maps API key server-side only. The frontend calls these
+# instead of loading the Maps JavaScript SDK (which would embed the key in
+# every page load). Uses the Places API (New) REST endpoints.
+
+PLACES_API_BASE = "https://places.googleapis.com/v1"
+
+
+def _extract_country(address_components):
+    """Pull the ISO 3166-1 alpha-2 country code out of a Places API (New)
+    addressComponents list, so callers can filter out cross-border results
+    (e.g. a Detroit search circle spilling across the river into Windsor)."""
+    for comp in address_components or []:
+        if "country" in (comp.get("types") or []):
+            return comp.get("shortText")
+    return None
+
+
+@https_fn.on_call(invoker="public", region="us-west1")
+def places_autocomplete(req: https_fn.CallableRequest) -> dict:
+    input_text = (req.data or {}).get("input", "").strip()
+    if not input_text:
+        return {"predictions": []}
+    if not GOOGLE_MAPS_API_KEY:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="GOOGLE_MAPS_API_KEY is not configured on the server.",
+        )
+
+    # Recommendations/Events default to Canada-only results; City Walk Planner
+    # passes an explicit (possibly empty) list to search worldwide.
+    region_codes = (req.data or {}).get("regionCodes", ["ca"])
+
+    request_body = {"input": input_text}
+    if region_codes:
+        request_body["includedRegionCodes"] = region_codes
+
+    try:
+        resp = requests.post(
+            f"{PLACES_API_BASE}/places:autocomplete",
+            headers={"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY},
+            json=request_body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE,
+            message=f"Autocomplete request failed: {e}",
+        )
+
+    predictions = []
+    for s in data.get("suggestions", []):
+        pred = s.get("placePrediction")
+        if not pred:
+            continue
+        predictions.append({
+            "place_id": pred.get("placeId"),
+            "description": (pred.get("text") or {}).get("text", ""),
+        })
+    return {"predictions": predictions}
+
+
+@https_fn.on_call(invoker="public", region="us-west1")
+def place_details(req: https_fn.CallableRequest) -> dict:
+    place_id = (req.data or {}).get("placeId", "").strip()
+    if not place_id:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="placeId is required",
+        )
+    if not GOOGLE_MAPS_API_KEY:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="GOOGLE_MAPS_API_KEY is not configured on the server.",
+        )
+
+    try:
+        resp = requests.get(
+            f"{PLACES_API_BASE}/places/{place_id}",
+            headers={
+                "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+                "X-Goog-FieldMask": (
+                    "location,formattedAddress,displayName,googleMapsUri,addressComponents,"
+                    "rating,userRatingCount,regularOpeningHours.weekdayDescriptions,"
+                    "editorialSummary,primaryTypeDisplayName"
+                ),
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE,
+            message=f"Place details request failed: {e}",
+        )
+
+    location = data.get("location") or {}
+    return {
+        "lat": location.get("latitude"),
+        "lng": location.get("longitude"),
+        "address": data.get("formattedAddress"),
+        "name": (data.get("displayName") or {}).get("text"),
+        "mapsUrl": data.get("googleMapsUri"),
+        "country": _extract_country(data.get("addressComponents")),
+        "rating": data.get("rating"),
+        "ratingCount": data.get("userRatingCount"),
+        "hours": (data.get("regularOpeningHours") or {}).get("weekdayDescriptions"),
+        "description": (data.get("editorialSummary") or {}).get("text"),
+        "categoryLabel": (data.get("primaryTypeDisplayName") or {}).get("text"),
+    }
+
+
+# ─── City Walk Planner: POI search + directions proxy ─────────────────────────
+#
+# Same server-side-key pattern as the autocomplete/details proxies above.
+
+@https_fn.on_call(invoker="public", region="us-west1")
+def nearby_places(req: https_fn.CallableRequest) -> dict:
+    data = req.data or {}
+    lat, lng = data.get("lat"), data.get("lng")
+    included_types = data.get("includedTypes") or []
+    radius = data.get("radius", 1500)
+    max_results = data.get("maxResultCount", 15)
+
+    if lat is None or lng is None or not included_types:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="lat, lng, and includedTypes are required",
+        )
+    if not GOOGLE_MAPS_API_KEY:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="GOOGLE_MAPS_API_KEY is not configured on the server.",
+        )
+
+    try:
+        resp = requests.post(
+            f"{PLACES_API_BASE}/places:searchNearby",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+                "X-Goog-FieldMask": (
+                    "places.id,places.displayName,places.location,places.rating,"
+                    "places.userRatingCount,places.types,places.googleMapsUri,places.primaryType,"
+                    "places.addressComponents,places.regularOpeningHours.weekdayDescriptions,"
+                    "places.editorialSummary,places.primaryTypeDisplayName"
+                ),
+            },
+            json={
+                "includedTypes": included_types,
+                "maxResultCount": max_results,
+                "locationRestriction": {
+                    "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radius}
+                },
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE,
+            message=f"Nearby search failed: {e}",
+        )
+
+    places = []
+    for p in result.get("places", []):
+        loc = p.get("location") or {}
+        places.append({
+            "placeId": p.get("id"),
+            "name": (p.get("displayName") or {}).get("text"),
+            "lat": loc.get("latitude"),
+            "lng": loc.get("longitude"),
+            "rating": p.get("rating"),
+            "ratingCount": p.get("userRatingCount"),
+            "types": p.get("types", []),
+            "primaryType": p.get("primaryType"),
+            "mapsUrl": p.get("googleMapsUri"),
+            "country": _extract_country(p.get("addressComponents")),
+            "hours": (p.get("regularOpeningHours") or {}).get("weekdayDescriptions"),
+            "description": (p.get("editorialSummary") or {}).get("text"),
+            "categoryLabel": (p.get("primaryTypeDisplayName") or {}).get("text"),
+        })
+    return {"places": places}
+
+
+@https_fn.on_call(invoker="public", region="us-west1")
+def walk_directions(req: https_fn.CallableRequest) -> dict:
+    data = req.data or {}
+    origin, destination = data.get("origin"), data.get("destination")
+    intermediates = data.get("intermediates") or []
+    mode = data.get("mode", "WALK")
+    optimize = bool(data.get("optimize", False))
+
+    if not origin or not destination:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="origin and destination are required",
+        )
+    if not GOOGLE_MAPS_API_KEY:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="GOOGLE_MAPS_API_KEY is not configured on the server.",
+        )
+
+    def waypoint(p):
+        return {"location": {"latLng": {"latitude": p["lat"], "longitude": p["lng"]}}}
+
+    body = {
+        "origin": waypoint(origin),
+        "destination": waypoint(destination),
+        "intermediates": [waypoint(p) for p in intermediates],
+        "travelMode": mode,
+        "optimizeWaypointOrder": optimize,
+    }
+
+    try:
+        resp = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+                "X-Goog-FieldMask": (
+                    "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,"
+                    "routes.legs.duration,routes.legs.distanceMeters,"
+                    "routes.optimizedIntermediateWaypointIndex"
+                ),
+            },
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAVAILABLE,
+            message=f"Directions request failed: {e}",
+        )
+
+    routes = result.get("routes") or []
+    if not routes:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="No route found between the given stops.",
+        )
+    route = routes[0]
+
+    def parse_duration(d):
+        # Routes API durations are strings like "123s"
+        return int(str(d or "0s").rstrip("s") or 0)
+
+    return {
+        "durationSec": parse_duration(route.get("duration")),
+        "distanceMeters": route.get("distanceMeters", 0),
+        "encodedPolyline": (route.get("polyline") or {}).get("encodedPolyline"),
+        "legs": [
+            {"durationSec": parse_duration(leg.get("duration")), "distanceMeters": leg.get("distanceMeters", 0)}
+            for leg in route.get("legs", [])
+        ],
+        "order": route.get("optimizedIntermediateWaypointIndex"),
+    }
 
 
 # ─── Podcast episode audio (Better Spotify feed player) ───────────────────────
@@ -1368,3 +2483,360 @@ def podcast_audio_proxy(req: https_fn.Request) -> https_fn.Response:
            if k in upstream.headers}
     out["Cache-Control"] = "private, max-age=3600"
     return https_fn.Response(upstream.iter_content(chunk_size=64 * 1024), status=upstream.status_code, headers=out)
+
+
+# ─── Sites and Bites: curated destination guides ─────────────────────────────
+#
+# Admin-only. Claude proposes the must-see places and neighbourhoods for a
+# destination; each place is then resolved through Places Text Search so the
+# map pins use real coordinates (and hallucinated or closed places are dropped).
+# The result is cached in Firestore `destinations/{placeId}`.
+
+import concurrent.futures
+import difflib
+import math
+import threading
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+SITES_BITES_MODEL = os.environ.get("SITES_BITES_MODEL", "claude-sonnet-5-5")
+SITES_BITES_ADMIN_UID = os.environ.get("ADMIN_UID", "8THLJbKP0qRINQ5RqjoUKIMtdVY2")
+SITES_BITES_CATEGORIES = ("eat", "drink", "cafe", "museum", "attraction", "activity", "outdoors")
+
+SITES_BITES_MIN_RATING = 4.1  # drop verified places rated below this (once they have 20+ reviews)
+
+SITES_BITES_AREAS_PROMPT = """You are an expert travel editor planning a visitor guide for: {dest}.
+
+Output JSON Lines: one complete JSON object per line, no markdown fences, no commentary. In this order:
+1. Exactly one summary line:
+{{"type":"summary","text":"2-3 sentence overview of the destination and what it is known for"}}
+2. 4 to 8 area lines. Areas are distinct neighbourhoods or districts that together cover everywhere a visitor will spend time, with no overlap:
+{{"type":"area","id":"short-slug","name":"Area name","description":"1-2 sentences on its character and why to go","bestFor":"e.g. nightlife, history, beaches"}}
+"""
+
+SITES_BITES_CATEGORY_PROMPT = """You are an expert travel editor compiling the definitive visitor guide for: {dest}. This request covers one category only: {label}.
+
+{definition}
+
+Be exhaustive within the bar of quality: list every {noun} that a well-informed local or seasoned traveller would genuinely recommend to a visitor, so that the reader never needs to consult a travel blog. Aim for about {target}; list fewer only if there truly are not that many good ones. Rank the most essential first. Skip chains and generic tourist traps unless iconic. Only include places you are confident exist, are currently operating, and can be found by exact official name.
+
+Areas of {dest} (use these ids):
+{areas}
+
+Output JSON Lines: one complete JSON object per line, no markdown fences, no commentary:
+{{"type":"place","name":"Exact official name","area":"an area id from above","tier":"must|great","kidFriendly":true,"locationHint":"street or neighbourhood plus city, to disambiguate","why":"max 25 words on what makes it special","tip":"max 15 words of practical advice (what to order, when to go, book ahead)"}}
+
+- tier "must" is only for the true must-visits (about one in five); the rest are "great".
+- kidFriendly is true only if genuinely enjoyable and practical for young children and families (not merely "children allowed"), otherwise false.
+"""
+
+SITES_BITES_CATEGORY_SPECS = {
+    "eat": ("Restaurants", "restaurant", "Restaurants and places for a proper meal, across price points and cuisines, including standout casual spots.", 25),
+    "drink": ("Bars and drinks", "bar or drinks venue", "Bars, cocktail lounges, breweries, wineries, distilleries and notable pubs.", 15),
+    "cafe": ("Cafes and bakeries", "cafe, bakery or dessert shop", "Coffee shops, bakeries, patisseries, ice cream and dessert spots.", 15),
+    "museum": ("Museums and culture", "museum, gallery or cultural site", "Museums, galleries, historic sites, architecture and notable cultural venues.", 12),
+    "attraction": ("Attractions", "attraction", "Landmarks, markets, shopping districts and entertainment venues.", 15),
+    "activity": ("Activities", "activity or experience", "Things to do and book: tours, spas, classes, adventure and sports experiences, scenic rides, shows.", 15),
+    "outdoors": ("Outdoors", "outdoor spot", "Parks, beaches, trails, gardens and viewpoints.", 12),
+}
+
+
+def _sb_error(code, message):
+    raise https_fn.HttpsError(code=code, message=message)
+
+
+def _sb_norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _sb_name_match(a, b):
+    a, b = _sb_norm(a), _sb_norm(b)
+    if not a or not b:
+        return 0.0
+    if a in b or b in a:
+        return 0.95
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _sb_distance_km(lat1, lng1, lat2, lng2):
+    p = math.pi / 180
+    h = (math.sin((lat2 - lat1) * p / 2) ** 2
+         + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin((lng2 - lng1) * p / 2) ** 2)
+    return 12742 * math.asin(math.sqrt(h))
+
+
+def _sb_destination_details(place_id):
+    resp = requests.get(
+        f"{PLACES_API_BASE}/places/{place_id}",
+        headers={
+            "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+            "X-Goog-FieldMask": "displayName,formattedAddress,location,viewport",
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    loc = data.get("location") or {}
+    vp = data.get("viewport") or {}
+    lo, hi = vp.get("low") or {}, vp.get("high") or {}
+    if lo and hi:
+        radius_km = _sb_distance_km(lo["latitude"], lo["longitude"], hi["latitude"], hi["longitude"]) / 2
+    else:
+        radius_km = 10
+    return {
+        "name": (data.get("displayName") or {}).get("text") or "",
+        "address": data.get("formattedAddress") or "",
+        "lat": loc.get("latitude"),
+        "lng": loc.get("longitude"),
+        "radiusKm": max(3.0, min(radius_km, 60.0)),
+    }
+
+
+def _sb_stream(prompt, max_tokens):
+    """Stream a JSON Lines answer from Claude, yielding each completed line as a dict."""
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": SITES_BITES_MODEL,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        stream=True,
+        timeout=(10, 120),
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Anthropic API {resp.status_code}: {resp.text[:300]}")
+
+    def parse(line):
+        line = line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            return json.loads(line)
+        except ValueError:
+            return None
+
+    buffer = ""
+    for raw in resp.iter_lines(decode_unicode=True):
+        if not raw or not raw.startswith("data:"):
+            continue
+        try:
+            event = json.loads(raw[5:].strip())
+        except ValueError:
+            continue
+        if event.get("type") == "error":
+            raise RuntimeError(f"Anthropic stream error: {event.get('error')}")
+        delta = event.get("delta") or {}
+        if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+            buffer += delta.get("text", "")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                obj = parse(line)
+                if obj:
+                    yield obj
+    obj = parse(buffer)
+    if obj:
+        yield obj
+
+
+
+def _sb_resolve_place(p, center, radius_km):
+    """Find the real Google place for a model-suggested place; None if unverifiable."""
+    query = f"{p['name']}, {p.get('locationHint') or ''}".strip(", ")
+    try:
+        resp = requests.post(
+            f"{PLACES_API_BASE}/places:searchText",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+                "X-Goog-FieldMask": (
+                    "places.id,places.displayName,places.location,places.formattedAddress,"
+                    "places.rating,places.userRatingCount,places.googleMapsUri,"
+                    "places.businessStatus,places.websiteUri"
+                ),
+            },
+            json={
+                "textQuery": query,
+                "pageSize": 3,
+                "locationBias": {"circle": {
+                    "center": {"latitude": center["lat"], "longitude": center["lng"]},
+                    "radius": min(50000.0, radius_km * 1000 * 1.5),
+                }},
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        candidates = resp.json().get("places", [])
+    except Exception:
+        return None
+
+    best, best_score = None, 0.0
+    for c in candidates:
+        if c.get("businessStatus") not in (None, "OPERATIONAL"):
+            continue
+        loc = c.get("location") or {}
+        if loc.get("latitude") is None:
+            continue
+        if _sb_distance_km(center["lat"], center["lng"], loc["latitude"], loc["longitude"]) > radius_km * 1.5 + 3:
+            continue
+        score = _sb_name_match(p["name"], (c.get("displayName") or {}).get("text"))
+        if score > best_score:
+            best, best_score = c, score
+    if not best or best_score < 0.55:
+        return None
+
+    rating, review_count = best.get("rating"), best.get("userRatingCount") or 0
+    if rating is not None and review_count >= 20 and rating < SITES_BITES_MIN_RATING:
+        return None
+
+    loc = best["location"]
+    return {
+        "placeId": best.get("id"),
+        "name": (best.get("displayName") or {}).get("text") or p["name"],
+        "category": p["category"],
+        "areaId": p["area"],
+        "tier": "must" if p.get("tier") == "must" else "great",
+        "kidFriendly": bool(p.get("kidFriendly")),
+        "why": (p.get("why") or "").strip(),
+        "tip": (p.get("tip") or "").strip(),
+        "lat": loc["latitude"],
+        "lng": loc["longitude"],
+        "address": best.get("formattedAddress"),
+        "rating": best.get("rating"),
+        "ratingCount": best.get("userRatingCount"),
+        "mapsUrl": best.get("googleMapsUri"),
+        "website": best.get("websiteUri"),
+    }
+
+
+@https_fn.on_call(invoker="public", region="us-west1", memory=1024, timeout_sec=540)
+def generate_destination(req: https_fn.CallableRequest) -> dict:
+    """Admin action: build (or rebuild) the guide for a destination.
+
+    Claude first defines the areas, then one call per category runs in parallel,
+    each asked for an exhaustive list. Every place is verified through Places and
+    written to the Firestore doc as it is found (status "generating"), so the
+    page fills in live.
+    """
+    if not req.auth or req.auth.uid != SITES_BITES_ADMIN_UID:
+        _sb_error(https_fn.FunctionsErrorCode.PERMISSION_DENIED, "Admin only")
+    place_id = ((req.data or {}).get("placeId") or "").strip()
+    if not place_id:
+        _sb_error(https_fn.FunctionsErrorCode.INVALID_ARGUMENT, "placeId is required")
+    if not GOOGLE_MAPS_API_KEY or not ANTHROPIC_API_KEY:
+        _sb_error(
+            https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            "GOOGLE_MAPS_API_KEY and ANTHROPIC_API_KEY must be set in functions/.env",
+        )
+
+    db_client = firestore.client()
+    ref = db_client.collection("destinations").document(place_id)
+    existing = ref.get()
+    if existing.exists and not (req.data or {}).get("refresh"):
+        return {"id": place_id, "cached": True}
+
+    try:
+        dest = _sb_destination_details(place_id)
+    except Exception as e:
+        _sb_error(https_fn.FunctionsErrorCode.UNAVAILABLE, f"Could not look up destination: {e}")
+    if dest["lat"] is None:
+        _sb_error(https_fn.FunctionsErrorCode.NOT_FOUND, "Destination has no location")
+
+    center = {"lat": dest["lat"], "lng": dest["lng"]}
+    label = dest["address"] or dest["name"]
+    ref.set({
+        "name": dest["name"],
+        "address": dest["address"],
+        "center": center,
+        "radiusKm": dest["radiusKm"],
+        "summary": "",
+        "areas": [],
+        "places": [],
+        "status": "generating",
+        "model": SITES_BITES_MODEL,
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    lock = threading.Lock()
+    seen = set()
+    stats = {"suggested": 0, "kept": 0}
+    failures = []
+
+    try:
+        # Step 1: summary and areas.
+        areas = []
+        for obj in _sb_stream(SITES_BITES_AREAS_PROMPT.format(dest=label), 3000):
+            if obj.get("type") == "summary":
+                ref.update({"summary": obj.get("text") or ""})
+            elif obj.get("type") == "area" and obj.get("id"):
+                area = {
+                    "id": obj["id"],
+                    "name": obj.get("name") or obj["id"],
+                    "description": obj.get("description") or "",
+                    "bestFor": obj.get("bestFor") or "",
+                }
+                areas.append(area)
+                ref.update({"areas": firestore.ArrayUnion([area])})
+        if not areas:
+            raise RuntimeError("Could not work out the areas of this destination")
+        area_ids = {a["id"] for a in areas}
+        area_text = "\n".join(f"- {a['id']}: {a['name']} ({a['description']})" for a in areas)
+        scale = 1.0 if dest["radiusKm"] > 15 else 0.7
+
+        # Step 2: one exhaustive call per category, in parallel.
+        def run_category(key):
+            title, noun, definition, target = SITES_BITES_CATEGORY_SPECS[key]
+            prompt = SITES_BITES_CATEGORY_PROMPT.format(
+                dest=label, label=title, noun=noun, definition=definition,
+                target=max(5, round(target * scale)), areas=area_text,
+            )
+            for obj in _sb_stream(prompt, 6000):
+                if obj.get("type") != "place" or not obj.get("name") or obj.get("area") not in area_ids:
+                    continue
+                with lock:
+                    stats["suggested"] += 1
+                obj["category"] = key
+                r = _sb_resolve_place(obj, center, dest["radiusKm"])
+                if not r:
+                    continue
+                with lock:
+                    if r["placeId"] in seen:
+                        continue
+                    seen.add(r["placeId"])
+                    stats["kept"] += 1
+                ref.update({"places": firestore.ArrayUnion([r])})
+
+        def safe_run(key):
+            try:
+                run_category(key)
+            except Exception as e:
+                failures.append(f"{key}: {e}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(SITES_BITES_CATEGORY_SPECS)) as pool:
+            list(pool.map(safe_run, SITES_BITES_CATEGORY_SPECS))
+
+        if stats["kept"] == 0:
+            raise RuntimeError("No verifiable places were found for this destination" + (f" ({failures[0]})" if failures else ""))
+
+        # Drop areas that ended up with no verified places.
+        snap = ref.get().to_dict()
+        used = {p["areaId"] for p in snap.get("places", [])}
+        update = {
+            "areas": [a for a in snap.get("areas", []) if a["id"] in used],
+            "status": "ready",
+            "droppedCount": stats["suggested"] - stats["kept"],
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        if failures:
+            update["error"] = "Some categories failed: " + "; ".join(failures)[:250]
+        ref.update(update)
+    except Exception as e:
+        ref.update({"status": "error", "error": str(e)[:300]})
+        _sb_error(https_fn.FunctionsErrorCode.UNAVAILABLE, f"Guide generation failed: {e}")
+
+    return {"id": place_id, "cached": False, "places": stats["kept"], "dropped": stats["suggested"] - stats["kept"]}

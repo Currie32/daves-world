@@ -25,6 +25,10 @@ const METRO_VAN_CENTER = [49.2488, -122.8], // roughly centered on the Tri-Citie
 const EVENT_SOURCES = [
   { key: 'coquitlam', label: 'City of Coquitlam' },
   { key: 'port_moody', label: 'City of Port Moody' },
+  { key: 'port_moody_signature', label: 'Port Moody Signature Events' },
+  { key: 'seasonal_curated', label: 'Seasonal Highlights' },
+  { key: 'vpl_kids', label: 'Vancouver Public Library (Kids & Family)' },
+  { key: 'surrey_libraries_kids', label: 'Surrey Libraries (Kids & Family)' },
   { key: 'port_coquitlam', label: 'City of Port Coquitlam' },
   { key: 'tourism_coquitlam', label: 'Tourism Coquitlam' },
   { key: 'destination_vancouver', label: 'Destination Vancouver' },
@@ -129,6 +133,37 @@ function buildMonthGrid(year, month) {
 function priceLabel(price) {
   if (!price || price.isFree) return 'Free';
   return price.text || 'Paid';
+}
+
+// ─── De-duplication across sources ─────────────────────────────────────────────
+// The same event often appears on two sites (e.g. a city calendar and a tourism
+// board). Treat two events from different sources as one when title and day match
+// and their times / venues don't contradict each other (a missing value matches
+// anything); keep whichever listing has the most detail.
+
+const normText = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const normTime = (t) => (t || '').toLowerCase().replace(/\s+/g, '');
+const detailScore = (e) => (e.timeText ? 1 : 0) + (e.location?.lat ? 2 : 0) + (e.location?.name ? 1 : 0) + (e.description ? 1 : 0);
+
+function sameEvent(a, b) {
+  if (a.source === b.source) return false;
+  if (normText(a.title) !== normText(b.title) || a.startDate !== b.startDate) return false;
+  const ta = normTime(a.timeText), tb = normTime(b.timeText);
+  if (ta && tb && ta !== tb) return false;
+  if (a.city && b.city && a.city !== b.city) return false;
+  const la = normText(a.location?.name), lb = normText(b.location?.name);
+  if (la && lb && !la.includes(lb) && !lb.includes(la)) return false;
+  return true;
+}
+
+function dedupeAcrossSources(items) {
+  const kept = [];
+  for (const ev of items) {
+    const i = kept.findIndex(k => sameEvent(k, ev));
+    if (i === -1) kept.push(ev);
+    else if (detailScore(ev) > detailScore(kept[i])) kept[i] = ev;
+  }
+  return kept;
 }
 
 // ─── Map helper: fly to bounds when markers change ────────────────────────────
@@ -301,7 +336,7 @@ export default function Events() {
           .map(d => ({ id: d.id, ...d.data() }))
           .filter(e => (e.endDate || e.startDate) >= today);
         items.sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
-        setEvents(items);
+        setEvents(dedupeAcrossSources(items));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -420,6 +455,9 @@ export default function Events() {
                   <strong>{m.title}</strong><br />
                   {formatEventDate(m)}
                   {m.location.address && <><br />{m.location.address}</>}
+                  {m.url && (
+                    <><br /><a href={m.url} target="_blank" rel="noopener noreferrer" style={s.ticketLink}>Event page →</a></>
+                  )}
                 </Popup>
               </Marker>
             ))}
