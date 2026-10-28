@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import PageHeader from '../components/PageHeader';
+import WeatherHistory from '../components/WeatherHistory';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -746,9 +747,9 @@ function DailyCard({ day }) {
   );
 }
 
-// ─── WeatherForecast (Page) ──────────────────────────────────────────────────
+// ─── Weather (Page) ──────────────────────────────────────────────────
 
-export default function WeatherForecast() {
+export default function Weather() {
   const [location, setLocation] = useState(getSavedLocation);
   const [hourlyData, setHourlyData] = useState(null);
   const [dailyData, setDailyData] = useState(null);
@@ -823,8 +824,8 @@ export default function WeatherForecast() {
   return (
     <div style={styles.page}>
       <PageHeader
-        title="Weather Forecast"
-        subtitle="Hourly and 14-day forecast with uncertainty ranges from ensemble models."
+        title="Weather"
+        subtitle="Forecasts with uncertainty ranges, plus how the past month and year compare with historical averages."
       />
 
       {/* Location bar with inline current conditions */}
@@ -886,7 +887,12 @@ export default function WeatherForecast() {
             <button style={styles.tab(activeTab === 'daily')} onClick={() => setActiveTab('daily')}>
               14-Day Outlook
             </button>
+            <button style={styles.tab(activeTab === 'history')} onClick={() => setActiveTab('history')}>
+              History
+            </button>
           </div>
+
+          {activeTab === 'history' && <WeatherHistory location={location} />}
 
           {activeTab === 'hourly' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>

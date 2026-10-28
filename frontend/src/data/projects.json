@@ -16,11 +16,11 @@
     "comingSoon": false
   },
   {
-    "id": "weather-forecast",
-    "title": "Weather Forecast",
-    "description": "Local weather forecast at a glance.",
+    "id": "weather",
+    "title": "Weather",
+    "description": "Local forecast, plus recent weather vs. historical averages.",
     "emoji": "🌤️",
-    "route": "/weather-forecast",
+    "route": "/weather",
     "comingSoon": false
   },
   {

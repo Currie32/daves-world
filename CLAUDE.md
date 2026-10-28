@@ -25,7 +25,7 @@ firestore.rules      # Firestore security rules
 | `/` | Home.jsx | Landing page with project cards |
 | `/recipes` | Cookbooks.jsx | Recipe/cookbook browser, recipe search, web recipe import |
 | `/recommendations` | Recommendations.jsx | Curated recommendations with map + admin CRUD |
-| `/weather-forecast` | WeatherForecast.jsx | Ensemble weather forecast with uncertainty viz |
+| `/weather` | Weather.jsx | Ensemble forecast with uncertainty viz, plus History tab (`components/WeatherHistory.jsx`: past month/year temp and precipitation vs 1991-2020 normals); `/weather-forecast` redirects here |
 | `/movie-finder` | MovieFinder.jsx | Movie discovery by mood/taste with streaming availability |
 | `/trail-poster` | TrailPoster.jsx | Trail poster maker with MapLibre GL, contour lines, export |
 | `/book-finder` | BookFinder.jsx | Book recommendations from seed books via Google Books API |
@@ -57,7 +57,7 @@ firestore.rules      # Firestore security rules
 - **Firebase**: Firestore (recommendations, website_recipes), Hosting, Cloud Functions
 - **Spotify**: PKCE OAuth (shared in `lib/spotify.js`; tokens stored per client ID; each page's URL must be a registered redirect URI on its Spotify app), Web API (search, artists, `/me/shows`, `/shows/{id}/episodes`, player), Web Playback SDK (requires Premium; not on iOS), iFrame embed API (Better Spotify fallback player)
 - **Google Places API**: Address autocomplete in Recommendations
-- **Open-Meteo**: Ensemble weather forecast API (no auth needed)
+- **Open-Meteo**: Ensemble forecast API plus the archive API (history and 1991-2020 normals; no auth needed)
 - **Leaflet/OpenStreetMap**: Map display in Recommendations
 - **TMDB**: Movie database API (discover, recommendations, watch providers)
 - **MapLibre GL + OpenFreeMap**: Vector tile map rendering for Trail Poster (no API key needed)
